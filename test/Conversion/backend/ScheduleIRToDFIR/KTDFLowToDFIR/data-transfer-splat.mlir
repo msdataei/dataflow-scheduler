@@ -9,7 +9,7 @@
 // CHECK:         dataflow.program_unit
 // CHECK:           agen.vector_load
 // CHECK-SAME:        vector<1xf16>
-// CHECK-NEXT:      %[[SHUFFLE:.+]] = vectorchain.shuffle %[[LOAD:.+]] {indices = [0 : i32], repetition = 64 : i32} : vector<1xf16>, vector<64xf16>
+// CHECK-NEXT:      %[[SHUFFLE:.+]] = vectorchain.shuffle input(%[[LOAD:.+]]) {indices = [0 : i32], repetition = 64 : i32} : vector<1xf16>, vector<64xf16>
 // CHECK:           dataflow.send %{{.*}}, %[[SHUFFLE]] : vector<64xf16>
 
 module {

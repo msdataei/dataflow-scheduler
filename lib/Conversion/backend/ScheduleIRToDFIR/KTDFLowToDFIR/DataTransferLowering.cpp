@@ -88,10 +88,9 @@ mlir::Value insertSplatShuffle(mlir::PatternRewriter& rewriter,
   auto result_type = mlir::VectorType::get({dst_elements}, elem_type);
 
   return mlir::vectorchain::ShuffleOp::create(
-             rewriter, loc, result_type, src_vec,
-             /*mask=*/nullptr,
-             /*dbgName=*/nullptr, indices_attr,
-             rewriter.getI32IntegerAttr(repetition))
+             rewriter, loc, result_type, src_vec, indices_attr,
+             rewriter.getI32IntegerAttr(repetition),
+             /*dbgName=*/nullptr)
       .getOutput();
 }
 
