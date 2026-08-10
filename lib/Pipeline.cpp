@@ -49,7 +49,7 @@ void scheduler::buildKTDPToDFIRPipeline(
   pm.addPass(mlir::createCanonicalizerPass());
   pm.addPass(mlir::createLoopInvariantCodeMotionPass());
   pm.addPass(mlir::ktdf::createStageCoarseningPass());
-  pm.addPass(mlir::ktdf::createReductionDimChunkingPass());
+  pm.addPass(mlir::ktdf::createReductionDimChunkingPass({.numChunks = {4}}));
   pm.addPass(mlir::ktdf::createReductionLoopExposurePass());
   pm.addPass(mlir::ktdf::createMapReductionPartialsPass());
   pm.addPass(mlir::ktdf::createBroadcastPromotionPass());

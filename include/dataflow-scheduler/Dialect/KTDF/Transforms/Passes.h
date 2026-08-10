@@ -52,6 +52,11 @@ auto createTileSizeSelectionPass() -> std::unique_ptr<Pass>;
 #define GEN_PASS_REGISTRATION
 #include "dataflow-scheduler/Dialect/KTDF/Transforms/Passes.h.inc"
 
+// Options structs above are defined by GEN_PASS_DECL; this overload must
+// appear after the include.
+auto createReductionDimChunkingPass(ReductionDimChunkingPassOptions options)
+    -> std::unique_ptr<Pass>;
+
 }  // namespace mlir::ktdf
 
 #endif  // DATAFLOW_SCHEDULER_DIALECT_KTDF_TRANSFORMS_PASSES_H_

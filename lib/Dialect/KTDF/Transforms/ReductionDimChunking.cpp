@@ -795,3 +795,8 @@ struct ReductionDimChunkingPass
 auto mlir::ktdf::createReductionDimChunkingPass() -> std::unique_ptr<Pass> {
   return std::make_unique<ReductionDimChunkingPass>();
 }
+
+auto mlir::ktdf::createReductionDimChunkingPass(
+    ReductionDimChunkingPassOptions options) -> std::unique_ptr<Pass> {
+  return std::make_unique<ReductionDimChunkingPass>(std::move(options));
+}
