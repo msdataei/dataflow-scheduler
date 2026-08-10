@@ -3,6 +3,7 @@ add_dataflow_scheduler_library(DataflowSchedulerKTDFAnalysis
     GlobalStageDAG.cpp
     LoopTiling.cpp
     PipelineScope.cpp
+    ReductionChunkAnalysis.cpp
     Reuse.cpp
     StageGrouping.cpp
     Utils.cpp

@@ -28,6 +28,7 @@
 // CHECK-NEXT:   canonicalize
 // CHECK-NEXT:   loop-invariant-code-motion
 // CHECK-NEXT:   stage-coarsening
+// CHECK-NEXT:   reduction-dim-chunking
 // CHECK-NEXT:   reduction-loop-exposure
 // CHECK-NEXT:   map-reduction-partials
 // CHECK-NEXT:   broadcast-promotion
