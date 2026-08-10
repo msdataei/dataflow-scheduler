@@ -27,11 +27,10 @@
 //      The total shrink factor R = product(dim_sizes[]).
 //   3. Get the parent ktdf.pipeline of the compute stage.
 //   4. Find the load stage (upstream of compute via depends_in/depends_out
-//      token chain).  Assert the load stage has exactly one FIFO-dest
-//      data_transfer — its destination is fifo_in.
-//   5. Shrink ALL FifoSlotType results in ktdf.private whose element count
-//      is divisible by R (divide by R).  Patch every fifo.allocate inside
-//      the private body to match.
+//      token chain).  Identify the FIFO-dest data_transfer that feeds
+//      linalg.generic ins() — its destination is fifo_in.
+//   5. Shrink only fifo_in in ktdf.private (divide its element count by R).
+//      Patch the corresponding fifo.allocate inside the private body to match.
 //   6. Patch every data_transfer inside the pipeline whose source or
 //      destination is a shrunken FIFO: divide its static sizes by R.
 //   7. For every stage in the pipeline, wrap its entire body in one nested
@@ -405,6 +404,71 @@ NestedForResult buildNestedForLoops(OpBuilder& builder, Location loc,
 }
 
 // ---------------------------------------------------------------------------
+// Find the data_transfer in `load_stage` whose FIFO-slot destination feeds the
+// linalg.generic inputs in `compute_stage`.  When there is only one FIFO-dest
+// transfer the choice is trivial.  When there are several (e.g. a main-input
+// transfer and a conditional accumulator transfer) we identify the right one by
+// tracing generic_op.getInputs().front() back to its ReadFromFifoOp and
+// matching on the FIFO slot value.
+//
+// Returns the destination Value of the chosen transfer, or a null Value and
+// emits an error on `inner_pipeline` if selection fails.
+// ---------------------------------------------------------------------------
+Value findFifoInTransfer(ktdf::PipelineOp inner_pipeline,
+                         ktdf::StageOp load_stage, ktdf::StageOp compute_stage,
+                         linalg::GenericOp generic_op) {
+  SmallVector<ktdf::DataTransferOp> fifo_dest_transfers;
+  load_stage.getBody()->walk([&](ktdf::DataTransferOp xfer) {
+    if (xfer.isDestFifo()) fifo_dest_transfers.push_back(xfer);
+  });
+
+  if (fifo_dest_transfers.empty()) {
+    inner_pipeline.emitError(PASS_NAME
+                             ": no FIFO-dest data_transfer in load stage");
+    return {};
+  }
+
+  if (fifo_dest_transfers.size() == 1) {
+    return fifo_dest_transfers.front().getDestination();
+  }
+
+  // Multiple FIFO-dest transfers: identify the one whose destination matches
+  // the FIFO slot consumed by linalg.generic ins().
+  Value generic_input = generic_op.getInputs().front();
+
+  // Direct case: the input is produced immediately by a read_from_fifo.
+  Value input_fifo;
+  if (auto read_op = generic_input.getDefiningOp<ktdf::ReadFromFifoOp>()) {
+    input_fifo = read_op.getFifoSlot();
+  } else {
+    // Fallback: scan every read_from_fifo inside the compute stage.
+    compute_stage.getBody()->walk([&](ktdf::ReadFromFifoOp read_op) {
+      if (read_op.getResult() == generic_input) {
+        input_fifo = read_op.getFifoSlot();
+      }
+    });
+  }
+
+  if (!input_fifo) {
+    inner_pipeline.emitError(
+        PASS_NAME
+        ": multiple FIFO-dest transfers in load stage and cannot "
+        "identify which feeds linalg.generic ins()");
+    return {};
+  }
+
+  for (auto xfer : fifo_dest_transfers) {
+    if (xfer.getDestination() == input_fifo) {
+      return xfer.getDestination();
+    }
+  }
+
+  inner_pipeline.emitError(
+      PASS_NAME ": none of the FIFO-dest transfers feeds linalg.generic ins()");
+  return {};
+}
+
+// ---------------------------------------------------------------------------
 // Build an i1 value that is true only when every iv[i] == last[i].
 // ---------------------------------------------------------------------------
 Value buildAllLast(OpBuilder& builder, Location loc, ArrayRef<Value> ivs,
@@ -533,18 +597,68 @@ struct ReductionLoopExposurePass
       return failure();
     }
 
-    unsigned fifo_in_idx = 0;
-    if (!resolveFifoInIndex(load_stage, priv_op, fifo_in_idx)) return failure();
+    // From the load stage, find the data_transfer whose FIFO destination feeds
+    // the linalg.generic inputs in the compute stage.
+    Value orig_fifo_in = findFifoInTransfer(inner_pipeline, load_stage,
+                                            compute_stage, generic_op);
+    if (!orig_fifo_in) return failure();
 
-    // -----------------------------------------------------------------------
-    // 1a. Shrink ALL FIFO slots in ktdf.private whose element count is a
-    //     multiple of reduction_size (= product of all per-dim sizes).
-    // -----------------------------------------------------------------------
+    // Validate that fifo_in is a ktdf.private result.
+    auto orig_fifo_in_result = dyn_cast<OpResult>(orig_fifo_in);
+    if (!orig_fifo_in_result || orig_fifo_in_result.getOwner() != priv_op) {
+      inner_pipeline.emitError(PASS_NAME
+                               ": fifo_in is not a ktdf.private result");
+      return failure();
+    }
+    unsigned fifo_in_idx = orig_fifo_in_result.getResultNumber();
+
+    // Build a map: only shrink the input FIFO (fifo_in_idx) — the one whose
+    // destination feeds linalg.generic ins().  Accumulator and other FIFOs
+    // must keep their original sizes; shrinking them by reduction_size would
+    // corrupt the accumulator slot that carries the running result.
     llvm::DenseMap<unsigned, ktdf::FifoSlotType> shrunken_fifo_map;
-    auto new_priv_or = shrinkPrivateFifoSlots(
-        rewriter, loc, ctx, priv_op, reduction_size, shrunken_fifo_map);
-    if (failed(new_priv_or)) return failure();
-    ktdf::PrivateOp new_priv = *new_priv_or;
+    SmallVector<Type> new_result_types(priv_op.getResultTypes());
+    {
+      auto fifo_type = dyn_cast<ktdf::FifoSlotType>(
+          priv_op.getResult(fifo_in_idx).getType());
+      if (!fifo_type) {
+        inner_pipeline.emitError(PASS_NAME ": fifo_in is not a FifoSlotType");
+        return failure();
+      }
+      int64_t num_elems = fifo_type.getNumElements();
+      if (num_elems % reduction_size != 0) {
+        inner_pipeline.emitError(PASS_NAME
+                                 ": input FIFO element count not divisible by "
+                                 "reduction_size");
+        return failure();
+      }
+      auto shrunken = ktdf::FifoSlotType::get(
+          ctx, fifo_type.getSrc(), fifo_type.getDest(),
+          num_elems / reduction_size, fifo_type.getElementType());
+      shrunken_fifo_map[fifo_in_idx] = shrunken;
+      new_result_types[fifo_in_idx] = shrunken;
+    }
+
+    // Replace priv_op with a new one carrying all shrunken FIFO types.
+    rewriter.setInsertionPoint(priv_op);
+    auto new_priv = ktdf::PrivateOp::create(rewriter, loc, new_result_types);
+    rewriter.mergeBlocks(&priv_op.getRegion().front(),
+                         &new_priv.getRegion().front(), {});
+
+    // Patch every fifo.allocate inside the new private body.
+    new_priv.getRegion().front().walk([&](ktdf::FifoAllocateOp alloc) {
+      for (auto& [idx, shrunken] : shrunken_fifo_map) {
+        auto orig_type =
+            dyn_cast<ktdf::FifoSlotType>(priv_op.getResult(idx).getType());
+        if (orig_type && alloc.getResult(0).getType() == orig_type)
+          alloc.getResult(0).setType(shrunken);
+      }
+    });
+
+    for (auto [old_res, new_res] :
+         llvm::zip(priv_op.getResults(), new_priv.getResults()))
+      old_res.replaceAllUsesWith(new_res);
+    rewriter.eraseOp(priv_op);
 
     Value fifo_in = new_priv.getResult(fifo_in_idx);
 
