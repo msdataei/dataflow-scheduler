@@ -84,11 +84,11 @@ def ReductionLoopExposurePass : Pass<"reduction-loop-exposure", "mlir::ModuleOp"
 
       ktdf.private: [fifo_in(R*C elements), fifo_out(C elements), ...]
 
-      load stage:    data_transfer  memory -> fifo_in   (full R*C slice)
+      load stage:    data_transfer  L1 -> fifo_in   (full R*C slice)
       compute stage: read_from_fifo -> tensor<1xRxCxf16>
                      linalg.generic (reduction) -> tensor<1xCxf16>
                      write_to_fifo
-      store stage:   data_transfer  fifo_out -> memory
+      store stage:   data_transfer  fifo_out -> L1
 
     After:
 
@@ -97,7 +97,7 @@ def ReductionLoopExposurePass : Pass<"reduction-loop-exposure", "mlir::ModuleOp"
                     (e.g. fifo_in: R*C -> C elements)
 
       load stage:    scf.for %r = 0 to R           -- all original ops inside
-                       data_transfer memory -> fifo_in  (static dest size / R)
+                       data_transfer L1 -> fifo_in  (static dest size / R)
       compute stage: %init = tensor.empty : tensor<1xCxf16>
                      scf.for %r = 0 to R iter_args(%carry = %init)
                          {loop_type = reduction_loop}
@@ -106,7 +106,7 @@ def ReductionLoopExposurePass : Pass<"reduction-loop-exposure", "mlir::ModuleOp"
                        if (%r == R-1): write_to_fifo %carry
                        scf.yield %carry
       store stage:   scf.for %r = 0 to R           -- all original ops inside
-                       if (%r == R-1): data_transfer fifo_out -> memory
+                       if (%r == R-1): data_transfer fifo_out -> L1
 
     Any data_transfer in any stage whose source or destination is a shrunken
     FIFO has its static sizes divided by R automatically.
@@ -212,6 +212,77 @@ def MapReductionPartialsPass : Pass<"map-reduction-partials", "mlir::ModuleOp"> 
     "mlir::ktdf::KTDFDialect",
     "mlir::arith::ArithDialect",
     "mlir::linalg::LinalgDialect",
+    "mlir::memref::MemRefDialect"
+  ];
+}
+
+def ReductionDimChunkingPass : Pass<"reduction-dim-chunking", "mlir::ModuleOp"> {
+  let summary = "Split the reduction dimension of inner linalg.generic ops into sequential chunks";
+  let description = [{
+    This pass targets the inner L1LU→SFU→L1SU pipeline that contains a
+    linalg.generic with a reduction iterator.  It replaces that single
+    pipeline with a scf.for over all num_chunks iterations, each iteration
+    containing one ktdf.pipeline (Load / SFU / Store stages).
+    First-vs-rest accumulation behaviour is selected at runtime via
+    `%is_first = arith.cmpi eq, %chunk, %c0`:
+
+      Load stage : always transfers the current input slice to fifo_in.
+                   When !is_first, also transfers the partial accumulator
+                   (the existing L1 output buffer) to fifo_out so the SFU
+                   can read it back.
+      SFU stage  : when is_first, initialises the output tensor with
+                   tensor.empty; otherwise reads the partial result from
+                   fifo_out.  The linalg.generic and write_to_fifo are
+                   unconditional.
+      Store stage: unconditionally writes fifo_out back to the L1 output
+                   buffer; no is_last distinction is needed.
+
+    The existing L1 output buffer (discovered via the store-stage
+    data_transfer destination) is reused as the partial-accumulation
+    buffer — no new memref is allocated.
+
+    Preconditions (checked, pass aborts cleanly if not met):
+    - The module contains exactly one outer ktdf.pipeline with three stages
+      (MNILU, compute, MNISU) matching the StageCoarsening output shape.
+    - The compute stage contains a scf.for (batch loop) whose body is a
+      single ktdf.pipeline with three stages: L1LU, SFU, L1SU.
+    - The SFU stage body contains exactly one linalg.generic with at least
+      one `reduction` iterator type.
+
+    Option `num-chunks` sets the static chunk count per reduction dim (one
+    value per dim, in iterator-type order).  Values may differ across dims;
+    the total number of sequential pipeline invocations equals the product of
+    all per-dim counts and a single flat loop de-interleaves per-dim indices
+    via row-major strides.  When omitted (the default), the pass infers the
+    chunk count automatically from the input tensor size and the
+    `chunk-size-threshold` option: it picks the smallest integer N ≥ 1 such
+    that (total_input_bytes / N) ≤ chunk-size-threshold AND N evenly divides
+    every reduction-dimension size.
+
+    Option `chunk-size-threshold` (default 1 MiB = 1048576 bytes) is the
+    per-chunk byte budget used when `num-chunks` is not provided.  It is
+    ignored when `num-chunks` is explicitly set.
+  }];
+  let constructor = "::mlir::ktdf::createReductionDimChunkingPass()";
+  let options = [
+    ListOption<"numChunks", "num-chunks", "unsigned",
+               "Number of sequential chunks per reduction dimension (one value "
+               "per reduction dim, in iterator-type order).  Values may differ "
+               "across dims; the pass uses a single flat loop of length "
+               "product(num-chunks) and de-interleaves per-dim indices via "
+               "row-major strides.  When empty (the default) the pass infers "
+               "the chunk count from chunk-size-threshold.">,
+    Option<"chunkSizeThreshold", "chunk-size-threshold", "int64_t",
+           "1048576",
+           "Per-chunk size budget in bytes used for automatic numChunks "
+           "inference when num-chunks is not specified (default: 1 MiB).">
+  ];
+  let dependentDialects = [
+    "mlir::ktdf::KTDFDialect",
+    "mlir::scf::SCFDialect",
+    "mlir::arith::ArithDialect",
+    "mlir::linalg::LinalgDialect",
+    "mlir::tensor::TensorDialect",
     "mlir::memref::MemRefDialect"
   ];
 }
