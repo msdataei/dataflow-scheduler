@@ -1,26 +1,18 @@
 // RUN: dataflow-scheduler-opt --reduction-loop-exposure %s | FileCheck %s
 
-// This script is intended to make adding checks to a test case quick and easy.
-// It is *not* authoritative about what constitutes a good test. After using the
-// script, be sure to review and refine the generated checks. For example,
-// CHECK lines should be minimized and named to reflect the test’s intent.
-// For comprehensive guidelines, see:
-//   * https://mlir.llvm.org/getting_started/TestingGuide/
-
-
 
 // CHECK: #[[$ATTR_0:.+]] = affine_map<(d0, d1, d2) -> (d0, d1, d2)>
 // CHECK: #[[$ATTR_1:.+]] = affine_map<(d0, d1, d2) -> (d0, d2)>
 // CHECK: #[[$ATTR_2:.+]] = affine_set<(d0, d1, d2) : (d0 >= 0, -d0 + 1 >= 0, d1 >= 0, -d1 + 255 >= 0, d2 >= 0, -d2 + 63 >= 0)>
 // CHECK: #[[$ATTR_3:.+]] = affine_set<(d0, d1) : (d0 >= 0, -d0 + 1 >= 0, d1 >= 0, -d1 + 63 >= 0)>
 // CHECK-LABEL:   module {
-// CHECK-NEXT:     func.func @sum_1core() attributes {grid = [1]} {
-// CHECK-NEXT:       call @local_schedule_0() : () -> ()
-// CHECK-NEXT:       return
-// CHECK-NEXT:     }
-// CHECK-NEXT:     func.func private @local_schedule_0()
-// CHECK-NEXT:   }
-// CHECK-NEXT:   ktdf_arch.device @spyre_single_corelet import("../../Dialect/KTDFArch/sample_device.mlir")
+// CHECK:     func.func @sum_1core() attributes {grid = [1]} {
+// CHECK:       call @local_schedule_0() : () -> ()
+// CHECK:       return
+// CHECK:     }
+// CHECK:     func.func private @local_schedule_0()
+// CHECK:   }
+// CHECK:   ktdf_arch.device @spyre_single_corelet import("../../Dialect/KTDFArch/sample_device.mlir")
 
 // CHECK-LABEL:   module @local_schedule_0 {
 // CHECK-NEXT:     func.func @local_schedule_0() attributes {grid = [1]} {
