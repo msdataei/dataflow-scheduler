@@ -31,10 +31,12 @@
 //                         stage-c (L1SU) : FIFO → L1
 //   stage-2 (MNISU)  : L1 → DDR store
 //
-// The transformation replaces the single inner ktdf.pipeline with a
-// scf.for over all num_chunks iterations.  Each iteration contains one
-// ktdf.pipeline (Load / SFU / Store stages).  First-vs-rest accumulation
-// behaviour is selected at runtime via %is_first = (chunk_iv == 0):
+// The transformation replaces the single inner ktdf.pipeline with nested
+// scf.for loops — one per reduction dimension that has more than 1 chunk.
+// Dimensions whose num_chunks==1 produce no loop (the single chunk covers
+// the entire dimension).  Each innermost iteration contains one ktdf.pipeline
+// (Load / SFU / Store stages).  First-vs-rest accumulation behaviour is
+// selected at runtime via %is_first = (all active loop IVs == 0):
 //
 //   Load stage : always transfers the input chunk slice to fifo_in.
 //                When !is_first, additionally transfers the partial
@@ -338,9 +340,8 @@ struct ReductionDimChunkingPass
         return success();
       }
 
-      // Compute total (flat) chunk count = product of per-dim chunk counts.
-      // Per-dim counts may differ; the single sequential loop iterates over
-      // all combinations via stride-based de-interleaving.
+      // We only need loop_num_chunks for the debug log; actual loops are
+      // per-dim so just track it for that purpose.
       loop_num_chunks = 1;
       for (unsigned nc : numChunks) loop_num_chunks *= nc;
 
@@ -371,7 +372,7 @@ struct ReductionDimChunkingPass
     }
 
     LDBG(1) << PASS_NAME ": num_reduction_dims=" << reduction_dims.size()
-            << " num_chunks=" << loop_num_chunks;
+            << " total_chunks=" << loop_num_chunks;
 
     // Collect per-dim chunk counts in reduction-dim order.
     SmallVector<int64_t> per_dim_num_chunks;
@@ -386,23 +387,33 @@ struct ReductionDimChunkingPass
 
     return rewriteComputeStage(inner_pipeline, load_stage, compute_stage,
                                store_stage, generic_op, reduction_dims,
-                               chunk_sizes, per_dim_num_chunks,
-                               static_cast<int64_t>(loop_num_chunks));
+                               chunk_sizes, per_dim_num_chunks);
   }
 
   // -----------------------------------------------------------------------
-  // Core rewrite: replace the inner pipeline with a single-loop chunked form.
+  // Core rewrite: replace the inner pipeline with nested scf.for loops —
+  // one per reduction dimension that has num_chunks > 1.  Dimensions with
+  // num_chunks == 1 produce no loop at all; the single chunk covers the
+  // whole dimension and no iteration is required.
   //
-  // Instead of generating separate Phase-A / Phase-B-loop / Phase-C pipelines,
-  // we emit a single scf.for over all chunks containing one ktdf.pipeline.
-  // First-vs-rest behaviour is guarded at runtime with scf.if (%is_first).
+  // For N active (chunked) dims the structure is:
+  //
+  //   scf.for %iv_0 = 0 to num_chunks[0] {     // only if num_chunks[0] > 1
+  //     scf.for %iv_1 = 0 to num_chunks[1] {   // only if num_chunks[1] > 1
+  //       ...
+  //         %is_first = (iv_0 == 0 && iv_1 == 0 && ...)
+  //         ktdf.pipeline { Load / SFU / Store }
+  //     }
+  //   }
+  //
+  // For dims whose num_chunks == 1, the IV is treated as the constant 0 when
+  // computing offsets and is_first.
   // -----------------------------------------------------------------------
   LogicalResult rewriteComputeStage(
       ktdf::PipelineOp inner_pipeline, ktdf::StageOp load_stage,
       ktdf::StageOp compute_stage, ktdf::StageOp store_stage,
       linalg::GenericOp generic_op, ArrayRef<int64_t> reduction_dims,
-      ArrayRef<int64_t> chunk_sizes, ArrayRef<int64_t> per_dim_num_chunks,
-      int64_t num_chunks) {
+      ArrayRef<int64_t> chunk_sizes, ArrayRef<int64_t> per_dim_num_chunks) {
     MLIRContext* context = inner_pipeline.getContext();
     IRRewriter rewriter(context);
     Location loc = inner_pipeline.getLoc();
@@ -425,45 +436,7 @@ struct ReductionDimChunkingPass
     auto output_memref_type = cast<MemRefType>(partial_memref.getType());
 
     // ------------------------------------------------------------------
-    // Step 2: Collect constants we need for arithmetic in the new bodies.
-    // Insert them before the batch for-loop so they are in scope everywhere.
-    // ------------------------------------------------------------------
-    scf::ForOp batch_for =
-        dyn_cast<scf::ForOp>(inner_pipeline->getParentRegion()->getParentOp());
-    rewriter.setInsertionPoint(batch_for ? batch_for.getOperation()
-                                         : inner_pipeline.getOperation());
-    Value c0 = arith::ConstantIndexOp::create(rewriter, loc, 0);
-    Value c1 = arith::ConstantIndexOp::create(rewriter, loc, 1);
-
-    // Per-reduction-dim: chunk_size constants and num_chunks constants.
-    SmallVector<Value> c_chunk_sizes;
-    for (int64_t cs : chunk_sizes)
-      c_chunk_sizes.push_back(
-          arith::ConstantIndexOp::create(rewriter, loc, cs));
-
-    // Row-major strides for de-interleaving flat chunk_idx.
-    SmallVector<int64_t> dim_strides(per_dim_num_chunks.size(), 1);
-    for (int64_t j = static_cast<int64_t>(per_dim_num_chunks.size()) - 2;
-         j >= 0; --j)
-      dim_strides[j] = dim_strides[j + 1] * per_dim_num_chunks[j + 1];
-    SmallVector<Value> c_dim_strides;
-    SmallVector<Value> c_per_dim_num_chunks;
-    for (size_t j = 0; j < per_dim_num_chunks.size(); ++j) {
-      c_dim_strides.push_back(
-          arith::ConstantIndexOp::create(rewriter, loc, dim_strides[j]));
-      c_per_dim_num_chunks.push_back(
-          arith::ConstantIndexOp::create(rewriter, loc, per_dim_num_chunks[j]));
-    }
-    Value c_num_chunks =
-        arith::ConstantIndexOp::create(rewriter, loc, num_chunks);
-    // c_num_chunks_m1 is not used directly in the new single-loop design;
-    // we still emit it (and suppress the warning below) so the outer scope
-    // retains the constant for any future reference.
-    Value c_num_chunks_m1 =
-        arith::ConstantIndexOp::create(rewriter, loc, num_chunks - 1);
-
-    // ------------------------------------------------------------------
-    // Step 3: Extract the input memref and derive the compute stage FIFO slot
+    // Step 2: Extract the input memref and derive the compute stage FIFO slot
     // types from the linalg.generic dataflow.
     // ------------------------------------------------------------------
     ktdf::DataTransferOp load_transfer;
@@ -530,11 +503,12 @@ struct ReductionDimChunkingPass
         cast<RankedTensorType>(generic_op.getOutputs().front().getType());
 
     // ------------------------------------------------------------------
-    // Step 4: Build the replacement: a single scf.for over all chunks that
-    // contains one ktdf.pipeline.  First-vs-rest behaviour is selected at
-    // runtime with scf.if guards.
+    // Step 3: Build the replacement: nested scf.for loops (one per reduction
+    // dim with num_chunks > 1) containing one ktdf.pipeline per innermost
+    // iteration.  First-vs-rest behaviour is selected at runtime with scf.if
+    // guards.
     //
-    // We insert the chunk loop BEFORE inner_pipeline, then erase it.
+    // We insert the outermost loop BEFORE inner_pipeline, then erase it.
     // ------------------------------------------------------------------
     rewriter.setInsertionPoint(inner_pipeline);
 
@@ -550,63 +524,99 @@ struct ReductionDimChunkingPass
     auto store_units = store_stage.getApplicableUnitsAttr();
 
     // Batch-loop induction variable.
-    Value batch_iv = batch_for.getInductionVar();
+    scf::ForOp batch_for =
+        dyn_cast<scf::ForOp>(inner_pipeline->getParentRegion()->getParentOp());
+
+    // Shared c0 / c1 constants emitted just before the outermost chunk loop.
+    Value c0 = arith::ConstantIndexOp::create(rewriter, loc, 0);
+    Value c1 = arith::ConstantIndexOp::create(rewriter, loc, 1);
+
+    // Per-dim chunk_size Value constants (emitted before the outermost loop).
+    SmallVector<Value> c_chunk_sizes;
+    for (int64_t cs : chunk_sizes)
+      c_chunk_sizes.push_back(
+          arith::ConstantIndexOp::create(rewriter, loc, cs));
+
+    // Per-dim num_chunks Value constants (emitted before the outermost loop).
+    SmallVector<Value> c_per_dim_num_chunks;
+    for (int64_t nc : per_dim_num_chunks)
+      c_per_dim_num_chunks.push_back(
+          arith::ConstantIndexOp::create(rewriter, loc, nc));
 
     // Emit L1-slot index: divsi(subi(batch_iv, c0), c1).
+    // Uses c0/c1 defined above.
+    Value batch_iv = batch_for ? batch_for.getInductionVar() : Value{};
     auto emit_l1_idx = [&](OpBuilder& builder, Location l,
                            Value batch_iv_val) -> Value {
       Value sub = arith::SubIOp::create(builder, l, batch_iv_val, c0);
       return arith::DivSIOp::create(builder, l, sub, c1);
     };
 
-    // ----------------------------------------------------------------
-    // Emit constants that belong INSIDE the compute stage's body
-    // (they reference chunk-related values and are best placed there).
-    // We emit them just before the chunk for-loop so the loop body can
-    // capture them as dominating definitions.
-    // ----------------------------------------------------------------
-    // These inner constants will be placed at the insertion point that is
-    // now set to just before inner_pipeline (i.e., inside the batch for-loop
-    // body, before the old inner pipeline).
-    Value inner_c0 = arith::ConstantIndexOp::create(rewriter, loc, 0);
-    Value inner_c1 = arith::ConstantIndexOp::create(rewriter, loc, 1);
-    Value c_num_chunks_const =
-        arith::ConstantIndexOp::create(rewriter, loc, num_chunks);
-    // Per-dim chunk_size and num_chunks constants placed at the inner
-    // insertion point (just before the chunk for-loop) so they dominate
-    // the loop body.
-    SmallVector<Value> inner_c_chunk_sizes;
-    for (int64_t cs : chunk_sizes)
-      inner_c_chunk_sizes.push_back(
-          arith::ConstantIndexOp::create(rewriter, loc, cs));
-    SmallVector<Value> inner_c_dim_strides;
-    SmallVector<Value> inner_c_per_dim_num_chunks;
-    for (size_t j = 0; j < per_dim_num_chunks.size(); ++j) {
-      inner_c_dim_strides.push_back(
-          arith::ConstantIndexOp::create(rewriter, loc, dim_strides[j]));
-      inner_c_per_dim_num_chunks.push_back(
-          arith::ConstantIndexOp::create(rewriter, loc, per_dim_num_chunks[j]));
+    // ------------------------------------------------------------------
+    // Build nested scf.for loops.  For each reduction dim j:
+    //   - if per_dim_num_chunks[j] == 1: no loop; iv[j] = c0 (constant 0).
+    //   - else: emit scf.for %iv_j = 0 to per_dim_num_chunks[j] step 1.
+    // Track active IVs for is_first computation and the OpBuilder to use
+    // when emitting the pipeline (starts at the innermost loop body or at
+    // the current insertion point if no loops were generated).
+    // ------------------------------------------------------------------
+    size_t n_dims = reduction_dims.size();
+
+    // Loop IVs per dim: either the loop's IV (if a loop was created for that
+    // dim) or c0 (if num_chunks == 1 for that dim).
+    SmallVector<Value> dim_ivs(n_dims);
+
+    // We build loops from outermost (dim 0) to innermost (dim n_dims-1).
+    // After the loop-building pass, `inner_builder` points to the body of
+    // the innermost loop (or to the original insertion point when no loops
+    // were generated).
+    OpBuilder inner_builder = rewriter;  // copy: same insertion point
+
+    for (size_t j = 0; j < n_dims; ++j) {
+      if (per_dim_num_chunks[j] == 1) {
+        // No loop for this dim: treat IV as constant 0.
+        dim_ivs[j] = c0;
+      } else {
+        // Emit a scf.for for this dim.
+        auto loop = scf::ForOp::create(inner_builder, loc, c0,
+                                       c_per_dim_num_chunks[j], c1);
+        dim_ivs[j] = loop.getInductionVar();
+        // Move the builder into the loop body for the next (inner) level.
+        inner_builder = OpBuilder(loop.getBody(), loop.getBody()->begin());
+      }
     }
-    (void)arith::ConstantIndexOp::create(rewriter, loc, num_chunks - 1);
 
-    // ---- Single chunk for-loop ----
-    auto chunk_for = scf::ForOp::create(rewriter, loc, inner_c0,
-                                        c_num_chunks_const, inner_c1);
-    Value chunk_iv = chunk_for.getInductionVar();
+    // ------------------------------------------------------------------
+    // Now emit the pipeline body using `inner_builder` (innermost context).
+    // ------------------------------------------------------------------
 
-    OpBuilder chunk_bldr(chunk_for.getBody(), chunk_for.getBody()->begin());
+    // %is_first = AND of (iv_j == 0) for all dims.
+    // Dims with num_chunks==1 have iv==c0, so their cmpi is trivially true
+    // but we omit them to avoid dead constants.  For dims with a real loop
+    // IV we emit the compare and AND them together.
+    Value is_first;
+    for (size_t j = 0; j < n_dims; ++j) {
+      if (per_dim_num_chunks[j] == 1) continue;  // iv is always 0
+      Value eq = arith::CmpIOp::create(
+          inner_builder, loc, arith::CmpIPredicate::eq, dim_ivs[j], c0);
+      is_first = is_first
+                     ? arith::AndIOp::create(inner_builder, loc, is_first, eq)
+                     : eq;
+    }
+    // If every dim had num_chunks==1 (degenerate: pass shouldn't have been
+    // called, but handle gracefully), is_first remains null — use c0 != c0
+    // equivalent: always true.
+    if (!is_first) {
+      is_first = arith::CmpIOp::create(inner_builder, loc,
+                                       arith::CmpIPredicate::eq, c0, c0);
+    }
 
-    // %is_first = arith.cmpi eq, %chunk, %c0
-    Value is_first = arith::CmpIOp::create(
-        chunk_bldr, loc, arith::CmpIPredicate::eq, chunk_iv, inner_c0);
-
-    // ---- Single pipeline per chunk ----
-    auto phase_pipeline = ktdf::PipelineOp::create(chunk_bldr, loc);
+    // ---- Single pipeline per innermost chunk iteration ----
+    auto phase_pipeline = ktdf::PipelineOp::create(inner_builder, loc);
     OpBuilder pipe_bldr(phase_pipeline.getBody(),
                         phase_pipeline.getBody()->end());
 
-    // Private: fifo_in, fifo_out, tok0, tok1 (same 4-result shape for all
-    // chunks).
+    // Private: fifo_in, fifo_out, tok0, tok1.
     auto slots = buildFifoPrivate(pipe_bldr, loc, chunk_in_fifo_type,
                                   out_fifo_type, std::nullopt);
     Value fifo_in = slots.getResult(0);
@@ -623,16 +633,11 @@ struct ReductionDimChunkingPass
       OpBuilder stage_bldr(load_new.getBody(), load_new.getBody()->end());
       Value l1_idx = emit_l1_idx(stage_bldr, loc, batch_iv);
 
-      // Per-reduction-dim row offsets: (chunk_iv / stride[j]) % num_chunks[j]
-      // * chunk_size[j].
+      // Per-reduction-dim row offsets: iv_j * chunk_size[j].
       SmallVector<Value> row_offsets;
-      for (size_t j = 0; j < inner_c_chunk_sizes.size(); ++j) {
-        Value divided = arith::DivSIOp::create(stage_bldr, loc, chunk_iv,
-                                               inner_c_dim_strides[j]);
-        Value per_dim_idx = arith::RemSIOp::create(
-            stage_bldr, loc, divided, inner_c_per_dim_num_chunks[j]);
-        row_offsets.push_back(arith::MulIOp::create(
-            stage_bldr, loc, per_dim_idx, inner_c_chunk_sizes[j]));
+      for (size_t j = 0; j < n_dims; ++j) {
+        row_offsets.push_back(arith::MulIOp::create(stage_bldr, loc, dim_ivs[j],
+                                                    c_chunk_sizes[j]));
       }
 
       // Source indices for the input data transfer.
@@ -646,7 +651,7 @@ struct ReductionDimChunkingPass
         if (it != reduction_dims.end())
           src_indices.push_back(row_offsets[it - reduction_dims.begin()]);
         else
-          src_indices.push_back(inner_c0);
+          src_indices.push_back(c0);
       }
 
       SmallVector<int64_t> src_static_sizes;
@@ -671,8 +676,6 @@ struct ReductionDimChunkingPass
       auto if_op =
           scf::IfOp::create(stage_bldr, loc, /*resultTypes=*/TypeRange{},
                             is_first, /*withElseRegion=*/true);
-      // then-region: empty — auto-yield already inserted by builder.
-      // else-region: transfer partial buffer → fifo_out (before auto-yield).
       {
         OpBuilder else_bldr =
             OpBuilder::atBlockBegin(&if_op.getElseRegion().front());
@@ -681,14 +684,12 @@ struct ReductionDimChunkingPass
             partial_rank, else_bldr.getContext());
         SmallVector<Value> partial_src_indices;
         partial_src_indices.push_back(l1_idx);
-        for (int64_t i = 1; i < partial_rank; ++i) {
-          partial_src_indices.push_back(inner_c0);
-        }
+        for (int64_t i = 1; i < partial_rank; ++i)
+          partial_src_indices.push_back(c0);
         SmallVector<int64_t> partial_src_sizes;
         partial_src_sizes.push_back(1);
-        for (int64_t i = 1; i < partial_rank; ++i) {
+        for (int64_t i = 1; i < partial_rank; ++i)
           partial_src_sizes.push_back(output_memref_type.getDimSize(i));
-        }
         ktdf::DataTransferOp::create(
             else_bldr, loc, partial_memref, partial_id, partial_src_indices,
             partial_src_sizes, fifo_out, AffineMap{}, ValueRange{},
@@ -705,20 +706,13 @@ struct ReductionDimChunkingPass
     {
       OpBuilder stage_bldr(sfu_new.getBody(), sfu_new.getBody()->end());
 
-      // Read input chunk from fifo_in.
       auto in_tensor = ktdf::ReadFromFifoOp::create(
           stage_bldr, loc, chunk_input_tensor_type, fifo_in);
 
-      // scf.if %is_first -> tensor<1x64xf16> {
-      //   tensor.empty()
-      // } else {
-      //   read_from_fifo fifo_out
-      // }
       auto if_outs = scf::IfOp::create(stage_bldr, loc,
                                        TypeRange{output_tensor_type}, is_first,
                                        /*withElseRegion=*/true);
       {
-        // then: zero-init
         OpBuilder then_bldr =
             OpBuilder::atBlockBegin(&if_outs.getThenRegion().front());
         Value empty_tensor = tensor::EmptyOp::create(
@@ -727,7 +721,6 @@ struct ReductionDimChunkingPass
         scf::YieldOp::create(then_bldr, loc, empty_tensor);
       }
       {
-        // else: read accumulated partial from fifo_out
         OpBuilder else_bldr =
             OpBuilder::atBlockBegin(&if_outs.getElseRegion().front());
         Value partial_tensor = ktdf::ReadFromFifoOp::create(
@@ -736,20 +729,17 @@ struct ReductionDimChunkingPass
       }
       Value outs_val = if_outs.getResult(0);
 
-      // Clone linalg.generic with updated ins/outs.
       IRMapping mapping;
       mapping.map(generic_op.getInputs().front(), in_tensor.getResult());
       mapping.map(generic_op.getOutputs().front(), outs_val);
       auto new_generic = cast<linalg::GenericOp>(
           stage_bldr.clone(*generic_op.getOperation(), mapping));
 
-      // Write result to fifo_out.
       ktdf::WriteToFifoOp::create(stage_bldr, loc, new_generic.getResult(0),
                                   fifo_out);
     }
 
     // -------- Store stage --------
-    // Always writes fifo_out → partial_memref (which IS the L1 output buffer).
     auto store_new = ktdf::StageOp::create(pipe_bldr, loc,
                                            /*depends_in=*/ValueRange{tok1},
                                            /*depends_out=*/ValueRange{});
@@ -764,7 +754,7 @@ struct ReductionDimChunkingPass
           AffineMap::getMultiDimIdentityMap(dest_rank, stage_bldr.getContext());
       SmallVector<Value> dest_indices;
       dest_indices.push_back(l1_idx);
-      for (int64_t i = 1; i < dest_rank; ++i) dest_indices.push_back(inner_c0);
+      for (int64_t i = 1; i < dest_rank; ++i) dest_indices.push_back(c0);
       SmallVector<int64_t> dest_sizes;
       dest_sizes.push_back(1);
       for (int64_t i = 1; i < dest_rank; ++i)
@@ -777,14 +767,9 @@ struct ReductionDimChunkingPass
     }
 
     // ------------------------------------------------------------------
-    // Step 5: Erase the original inner pipeline.
+    // Step 4: Erase the original inner pipeline.
     // ------------------------------------------------------------------
     rewriter.eraseOp(inner_pipeline);
-
-    // Suppress unused-variable warnings for constants we computed but the
-    // new IR accesses via the captured values above.
-    (void)c_num_chunks;
-    (void)c_num_chunks_m1;
 
     return success();
   }
