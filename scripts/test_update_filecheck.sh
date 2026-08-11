@@ -36,7 +36,11 @@ function derivePathsFromBuildDir() {
     exit 1
   fi
 
-  KTIRScheduler="${build_dir}/bin/dataflow-scheduler"
+  # Both driver binaries live in the same bin/ directory.
+  # The actual binary to invoke is determined later per-file from the RUN line.
+  SCHEDULER_BIN_DIR="${build_dir}/bin"
+  # Keep a default for callers that don't go through run_binary detection.
+  KTIRScheduler="${SCHEDULER_BIN_DIR}/dataflow-scheduler"
 
   # Extract the LLVM cmake directory recorded during the build.
   # CMakeCache.txt line format:  LLVM_DIR:PATH=<path>
@@ -120,107 +124,196 @@ function parseCommandLine() {
   derivePathsFromBuildDir "${build_dir}"
 }
 
+# ---------------------------------------------------------------------------
+# process_run_line FILE RUN_LINE
+#
+# Runs the binary named in RUN_LINE against FILE, calls
+# generate-test-checks.py with the appropriate --prefix, and prints the
+# resulting CHECK block to stdout.  The original RUN line (with %s replaced
+# by the actual path) is NOT emitted here; callers collect and prepend it.
+# ---------------------------------------------------------------------------
+function process_run_line() {
+  local file="$1"
+  local run_line="$2"
+
+  # Strip leading // and RUN: marker.
+  local stripped
+  stripped=$(echo "${run_line}" | sed -e 's|^[[:space:]]*//__RUN__:||' \
+                                      -e 's|^[[:space:]]*//[[:space:]]*RUN:[[:space:]]*||')
+
+  # Detect round-trip (binary ... | binary ...).
+  local is_roundtrip=0
+  if echo "${stripped}" | grep -qE 'scheduler[^|]*\|[^|]*scheduler'; then
+    is_roundtrip=1
+  fi
+
+  # Extract the binary name (first token).
+  local run_binary
+  run_binary=$(echo "${stripped}" | awk '{print $1}')
+
+  # Resolve binary path.
+  local resolved_binary="${SCHEDULER_BIN_DIR}/${run_binary}"
+  if [[ ! -x "${resolved_binary}" ]]; then
+    echo "Error: binary '${resolved_binary}' not found or not executable" >&2
+    return 1
+  fi
+
+  # Extract flags: everything between the binary name and the first | (or end).
+  local flags
+  if [[ ${is_roundtrip} -eq 1 ]]; then
+    flags=$(echo "${stripped}" | sed -e "s|^${run_binary}[[:space:]]*||" \
+                                     -e 's/|.*//' \
+                                     -e 's/%s//' \
+                                     -e 's/[[:space:]]*$//')
+  else
+    flags=$(echo "${stripped}" | sed -e "s|^${run_binary}[[:space:]]*||" \
+                                     -e 's/|[^|]*$//' \
+                                     -e 's/FileCheck[^%]*%s[^%]*//' \
+                                     -e 's/%s//' \
+                                     -e 's/[[:space:]]*$//')
+  fi
+  flags=$(echo "${flags}" | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//')
+
+  # Extract --check-prefix value (default: CHECK).
+  local prefix
+  prefix=$(echo "${stripped}" | grep -oE -- '--check-prefix=[^[:space:]]+' \
+           | sed 's/--check-prefix=//' | head -1)
+  [[ -z "${prefix}" ]] && prefix="CHECK"
+
+  echo "  run command : ${flags}" >&2
+  echo "  check prefix: ${prefix}" >&2
+
+  # Run the pass and generate checks.
+  local tmp_checks="/tmp/out_checks_${prefix}"
+  if [[ -n "${flags}" ]]; then
+    eval "${resolved_binary}" ${flags} "${file}" \
+      | "${LLVM_PROJ_SRC}/mlir/utils/generate-test-checks.py" \
+          --check-prefix="${prefix}" \
+      > "${tmp_checks}"
+  else
+    eval "${resolved_binary}" "${file}" \
+      | "${LLVM_PROJ_SRC}/mlir/utils/generate-test-checks.py" \
+          --check-prefix="${prefix}" \
+      > "${tmp_checks}"
+  fi
+
+  # generate-test-checks.py emits affine-map / affine-set attribute definition
+  # lines with the bare "// CHECK:" prefix even when --check-prefix is set.
+  # Replace them with the actual prefix so each run is self-contained.
+  if [[ "${prefix}" != "CHECK" ]]; then
+    sed -i '' -e "s|^// CHECK: #|// ${prefix}: #|g" "${tmp_checks}"
+  fi
+
+  # Convert CHECK:      (6 spaces) → CHECK-NEXT: for body lines.
+  sed -i '' -e "s|// ${prefix}:      |// ${prefix}-NEXT:|g" "${tmp_checks}"
+
+  # The output always contains a top-level wrapper module { ... } that has a
+  # nested module { on the very next line.  CHECK-NEXT on that first nested
+  # line fails because FileCheck sees an intervening line.  Convert all
+  # {PREFIX}-NEXT: lines in that first CHECK-LABEL block back to plain
+  # {PREFIX}: so FileCheck uses non-consecutive matching for them.
+  awk -v p="${prefix}" '
+    BEGIN { in_outer=0 }
+    $0 ~ ("^// " p "-LABEL:   module \\{$") { in_outer=1; print; next }
+    in_outer && $0 ~ ("^// " p "-LABEL:") { in_outer=0 }
+    in_outer {
+      line=$0
+      gsub("^// " p "-NEXT:", "// " p ":", line)
+      print line; next
+    }
+    { print }
+  ' "${tmp_checks}" > /tmp/out && mv /tmp/out "${tmp_checks}"
+
+  # For compute-group-extraction, fix the nested top-level module structure.
+  if echo "${flags}" | grep -q "compute-group-extraction"; then
+    awk -v p="${prefix}" \
+      '!done && $0 == "// " p "-LABEL:   module {" {
+         print "// " p ": module {"
+         print "// " p ":   module {"
+         done=1; next
+       } {print}' "${tmp_checks}" > /tmp/out && mv /tmp/out "${tmp_checks}"
+    sed -i '' -e "s|^// ${prefix}-LABEL:   module {$|// ${prefix}:   module {|" \
+        "${tmp_checks}"
+    printf "// %s: }" "${prefix}" >> "${tmp_checks}"
+  fi
+
+  # Strip the auto-generated preamble comment block.
+  sed -e '/^\/\/ The script is designed to make adding checks to$/,/^\/\/ minimized and named to reflect the test intent\.$/d' \
+      "${tmp_checks}" > /tmp/out && mv /tmp/out "${tmp_checks}"
+  # Also strip the NOTE header line generate-test-checks.py sometimes emits.
+  sed -e "/\/\/ NOTE: Assertions have been autogenerated by/d" \
+      "${tmp_checks}" > /tmp/out && mv /tmp/out "${tmp_checks}"
+
+  cat "${tmp_checks}"
+}
+
 function run() {
 
   files="$(find $1 -name '*.mlir')"
   for file in $files ; do
-    echo "test file:" $file
-    # RUN lines
-    run_scheduler=$(grep "RUN:" "$file" | grep "scheduler" )
-    if [[ "$(grep "RUN:" "$file" | wc -l)" -eq "0" ]]; then
-      echo "RUN line is needed"
-      return 1
+    echo "test file: ${file}"
+
+    # Collect all scheduler RUN lines from the file (bash 3.2 compatible).
+    run_lines=()
+    while IFS= read -r line; do
+      run_lines+=("${line}")
+    done < <(grep "RUN:" "${file}" | grep "scheduler")
+    if [[ ${#run_lines[@]} -eq 0 ]]; then
+      echo "  RUN line referencing a scheduler binary is needed — skipping"
+      continue
     fi
 
-    # Check if this is a round-trip test (contains multiple scheduler invocations)
-    is_roundtrip=0
-    if echo "${run_scheduler}" | grep -q "scheduler.*|.*scheduler"; then
-      is_roundtrip=1
-      echo "Detected round-trip test"
-    fi
+    echo "  found ${#run_lines[@]} RUN line(s)"
 
-#    echo "run command: $run_scheduler"
+    # Strip all existing RUN / CHECK / NOTE lines from the file so we can
+    # rebuild them cleanly.
+    sed -e "/^\/\/ RUN:/d" \
+        -e "/\/\/ NOTE: Assertions have been autogenerated by/d" \
+        -e "/\/\/ CHECK/d" \
+        < "${file}" > /tmp/out && mv /tmp/out "${file}"
 
-    # Capture the binary name (first word after RUN:) before stripping it
-    run_binary=$(echo "${run_scheduler}" | sed -e 's/\/\///' | sed -e 's/RUN://' | sed -e 's/^ *//' | awk '{print $1}')
+    # Generate check blocks for every RUN line and accumulate them.
+    > /tmp/all_checks  # start fresh
+    local all_run_headers=""
+    for run_line in "${run_lines[@]}"; do
+      # Reconstruct the canonical RUN header for this line.
+      local stripped
+      stripped=$(echo "${run_line}" | sed -e 's|^[[:space:]]*//[[:space:]]*RUN:[[:space:]]*||')
+      local run_binary
+      run_binary=$(echo "${stripped}" | awk '{print $1}')
+      local is_roundtrip=0
+      echo "${stripped}" | grep -qE 'scheduler[^|]*\|[^|]*scheduler' && is_roundtrip=1
 
-    # get the actual command (flags only — strip binary name, pipes, FileCheck, %s)
-    if [ ${is_roundtrip} -eq 1 ]; then
-      # For round-trip tests, extract only the flags before the first pipe
-      run_scheduler=$(echo "${run_scheduler}" | sed -e 's/\/\///' | sed -e 's/RUN://' | sed -e 's/|.*//' | sed -e "s/${run_binary}//" | sed -e 's/%s//' | sed -e 's/^ *//')
-    else
-      # For non-round-trip tests, remove pipes and FileCheck
-      run_scheduler=$(echo "${run_scheduler}" | sed -e 's/\/\///' | sed -e 's/RUN://' | sed -e 's/|//g' | sed -e 's/FileCheck.*//' | sed -e "s/${run_binary}//" | sed -e 's/%s//' | sed -e 's/^ *//')
-    fi
-
-#    echo "run command: $run_scheduler"
-
-    # trim
-    run_scheduler=$(echo "${run_scheduler}" | sed -e 's/^ *//' | sed -e 's/ *$//')
-
-    echo "run command: $run_scheduler"
-
-    # Delete all RUN lines (they will be regenerated)
-    sed -e "/^\/\/ RUN:/d" < $file > /tmp/out && mv /tmp/out $file
-
-    sed -e "/\/\/ NOTE: Assertions have been autogenerated by/d" < $file > /tmp/out && mv /tmp/out $file
-    sed -e "/\/\/ CHECK/d" < $file > /tmp/out && mv /tmp/out $file
-    if [ ! -z ${KTIRScheduler} ]; then
-      if [ ! -z "${run_scheduler}" ]; then
-        echo "${KTIRScheduler} ${run_scheduler} ${file} | $LLVM_PROJ_SRC/mlir/utils/generate-test-checks.py > /tmp/out_sent"
-        eval ${KTIRScheduler} ${run_scheduler} ${file} | $LLVM_PROJ_SRC/mlir/utils/generate-test-checks.py > /tmp/out_sent
-#       sed -e "s/\/\/ CHECK:/\/\/ CHECK:/" < ${file} > /tmp/out && mv /tmp/out /tmp/out_sent
-        sed -e "s/\/\/ CHECK:      /\/\/ CHECK-NEXT:/" < /tmp/out_sent > /tmp/out && mv /tmp/out /tmp/out_sent
+      if [[ ${is_roundtrip} -eq 1 ]]; then
+        local flags
+        flags=$(echo "${stripped}" | sed -e "s|^${run_binary}[[:space:]]*||" \
+                                         -e 's/|.*//' \
+                                         -e 's/%s//' \
+                                         -e 's/[[:space:]]*$//')
+        flags=$(echo "${flags}" | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//')
+        all_run_headers+="// RUN: ${run_binary} ${flags} %s | ${run_binary} ${flags} | FileCheck %s"$'\n'
       else
-        # Empty command means just parse the file (no transformation passes)
-        echo "${KTIRScheduler} ${file} | $LLVM_PROJ_SRC/mlir/utils/generate-test-checks.py > /tmp/out_sent"
-        eval ${KTIRScheduler} ${file} | $LLVM_PROJ_SRC/mlir/utils/generate-test-checks.py > /tmp/out_sent
-        sed -e "s/\/\/ CHECK:      /\/\/ CHECK-NEXT:/" < /tmp/out_sent > /tmp/out && mv /tmp/out /tmp/out_sent
+        # Preserve the original RUN line as-is (it already has the right
+        # --check-prefix and FileCheck invocation).
+        all_run_headers+="// RUN: ${stripped}"$'\n'
       fi
-    else
-      echo "scheduler not found!"
-      return 1
-    fi
-    
-    # For compute-group-extraction pass, add top-level module checks
-    if echo "${run_scheduler}" | grep -q "compute-group-extraction"; then
-      echo "Adding top-level module checks for compute-group-extraction..."
-      # Replace first CHECK-LABEL:   module { with CHECK: module { and CHECK:   module {
-      awk '!done && /^\/\/ CHECK-LABEL:   module \{$/ {print "// CHECK: module {"; print "// CHECK:   module {"; done=1; next} {print}' /tmp/out_sent > /tmp/out && mv /tmp/out /tmp/out_sent
-      # Replace remaining CHECK-LABEL with CHECK for other child modules
-      sed -e 's/^\/\/ CHECK-LABEL:   module {$/\/\/ CHECK:   module {/' < /tmp/out_sent > /tmp/out && mv /tmp/out /tmp/out_sent
-      # Add closing brace for top-level module without extra newline
-      printf "// CHECK: }" >> /tmp/out_sent
-    fi
-    
-    echo "" | cat - $file > /tmp/out && mv /tmp/out $file
 
-#    echo "file after:";    eval cat $file
-#    echo "out_sent:"; eval cat /tmp/out_sent
-    if [ ${is_roundtrip} -eq 1 ]; then
-        # For round-trip tests, add the extra scheduler invocation
-        if [ ! -z "${run_scheduler}" ]; then
-            echo "// RUN: ${run_binary} ${run_scheduler} %s | ${run_binary} ${run_scheduler} | FileCheck %s" | cat - /tmp/out_sent | cat - $file > /tmp/out && mv /tmp/out $file
-        else
-            echo "// RUN: ${run_binary} %s | ${run_binary} | FileCheck %s" | cat - /tmp/out_sent | cat - $file > /tmp/out && mv /tmp/out $file
-        fi
-        sed -e "/NOTE: Assertions have been autogenerated by/d" < $file > /tmp/out && mv /tmp/out $file
-    else
-        # For non-round-trip tests
-        if [ ! -z "${run_scheduler}" ]; then
-            echo "// RUN: ${run_binary} ${run_scheduler} %s | FileCheck %s" | cat - /tmp/out_sent | cat - $file > /tmp/out && mv /tmp/out $file
-            sed -e "/NOTE: Assertions have been autogenerated by/d" < $file > /tmp/out && mv /tmp/out $file
-        else
-            echo "// RUN: ${run_binary} %s | FileCheck %s" | cat - /tmp/out_sent | cat - $file > /tmp/out && mv /tmp/out $file
-            sed -e "/NOTE: Assertions have been autogenerated by/d" < $file > /tmp/out && mv /tmp/out $file
-        fi
-    fi
+      # Generate and append the check block.
+      echo "--- processing: ${run_line}" >&2
+      process_run_line "${file}" "${run_line}" >> /tmp/all_checks
+      echo "" >> /tmp/all_checks  # blank separator between blocks
+    done
 
-    # No need to replace CHECK prefix anymore since we're using default CHECK
+    # Prepend: RUN headers, then check blocks, then original MLIR body.
+    {
+      printf '%s' "${all_run_headers}"
+      echo ""
+      cat /tmp/all_checks
+    } | cat - "${file}" > /tmp/out && mv /tmp/out "${file}"
 
-    # remove the auto-generated comment block from generate-test-checks.py
+    # Clean up residual auto-generated comment blocks introduced by cat above.
     sed -e '/^\/\/ The script is designed to make adding checks to$/,/^\/\/ minimized and named to reflect the test intent\.$/d' \
-        < $file > /tmp/out && mv /tmp/out $file
+        < "${file}" > /tmp/out && mv /tmp/out "${file}"
 
   done
 }
