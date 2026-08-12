@@ -113,44 +113,6 @@ bool stageConsumesToken(ktdf::StageOp stage, Value token) {
 }
 
 // ---------------------------------------------------------------------------
-// Locate the unique FIFO-dest data_transfer in `load_stage` and validate that
-// its destination is a result of `priv_op`.  On success writes the result
-// index into `fifo_in_idx` and returns true.  Returns false and emits a
-// diagnostic on any violation:
-//   - no FIFO-dest transfer found
-//   - more than one FIFO-dest transfer found
-//   - destination is not a ktdf.private result
-// ---------------------------------------------------------------------------
-static bool resolveFifoInIndex(ktdf::StageOp load_stage,
-                               ktdf::PrivateOp priv_op, unsigned& fifo_in_idx) {
-  SmallVector<ktdf::DataTransferOp> fifo_dest_transfers;
-  load_stage.getBody()->walk([&](ktdf::DataTransferOp xfer) {
-    if (xfer.isDestFifo()) fifo_dest_transfers.push_back(xfer);
-  });
-  if (fifo_dest_transfers.empty()) {
-    load_stage.emitError(PASS_NAME
-                         ": no FIFO-dest data_transfer in load stage");
-    return false;
-  }
-  if (fifo_dest_transfers.size() > 1) {
-    load_stage.emitError(PASS_NAME
-                         ": multiple FIFO-dest data_transfers in load stage"
-                         " — not supported");
-    return false;
-  }
-
-  Value dest = fifo_dest_transfers.front().getDestination();
-  auto dest_result = dyn_cast<OpResult>(dest);
-  if (!dest_result || dest_result.getOwner() != priv_op) {
-    load_stage.emitError(PASS_NAME ": fifo_in is not a ktdf.private result");
-    return false;
-  }
-
-  fifo_in_idx = dest_result.getResultNumber();
-  return true;
-}
-
-// ---------------------------------------------------------------------------
 // Carry the result of per-dimension reduction analysis.
 // ---------------------------------------------------------------------------
 struct ReductionInfo {
@@ -199,61 +161,6 @@ static bool collectReductionInfo(linalg::GenericOp generic_op,
   LDBG(1) << "] total_reduction_size=" << info.reduction_size;
 
   return true;
-}
-
-// ---------------------------------------------------------------------------
-// Replace `priv_op` with a new ktdf.private whose FIFO slots are divided by
-// `reduction_size` (skipping slots whose element count is not a multiple of
-// `reduction_size`).  Patches
-// every fifo.allocate inside the new body to match.
-//
-// On success returns the replacement PrivateOp and fills `shrunken_fifo_map`
-// (result-index → new FifoSlotType).  Returns failure() and emits a
-// diagnostic when no slot is divisible.
-// ---------------------------------------------------------------------------
-static FailureOr<ktdf::PrivateOp> shrinkPrivateFifoSlots(
-    IRRewriter& rewriter, Location loc, MLIRContext* ctx,
-    ktdf::PrivateOp priv_op, int64_t reduction_size,
-    llvm::DenseMap<unsigned, ktdf::FifoSlotType>& shrunken_fifo_map) {
-  SmallVector<Type> new_result_types(priv_op.getResultTypes());
-  for (unsigned i = 0; i < priv_op.getNumResults(); ++i) {
-    auto fifo_type =
-        dyn_cast<ktdf::FifoSlotType>(priv_op.getResult(i).getType());
-    if (!fifo_type) continue;
-    int64_t num_elems = fifo_type.getNumElements();
-    if (num_elems % reduction_size != 0) continue;
-    auto shrunken = ktdf::FifoSlotType::get(
-        ctx, fifo_type.getSrc(), fifo_type.getDest(),
-        num_elems / reduction_size, fifo_type.getElementType());
-    shrunken_fifo_map[i] = shrunken;
-    new_result_types[i] = shrunken;
-  }
-  if (shrunken_fifo_map.empty()) {
-    priv_op.emitError(PASS_NAME ": no FIFO slots divisible by reduction_size");
-    return failure();
-  }
-
-  rewriter.setInsertionPoint(priv_op);
-  auto new_priv = ktdf::PrivateOp::create(rewriter, loc, new_result_types);
-  rewriter.mergeBlocks(&priv_op.getRegion().front(),
-                       &new_priv.getRegion().front(), {});
-
-  // Patch every fifo.allocate inside the new body to use the shrunken type.
-  new_priv.getRegion().front().walk([&](ktdf::FifoAllocateOp alloc) {
-    for (auto& [idx, shrunken] : shrunken_fifo_map) {
-      auto orig_type =
-          dyn_cast<ktdf::FifoSlotType>(priv_op.getResult(idx).getType());
-      if (orig_type && alloc.getResult(0).getType() == orig_type)
-        alloc.getResult(0).setType(shrunken);
-    }
-  });
-
-  for (auto [old_res, new_res] :
-       llvm::zip(priv_op.getResults(), new_priv.getResults()))
-    old_res.replaceAllUsesWith(new_res);
-  rewriter.eraseOp(priv_op);
-
-  return new_priv;
 }
 
 // ---------------------------------------------------------------------------
