@@ -140,6 +140,10 @@
 // CHECK-NEXT:                     %[[CREATE_TOKEN_2:.*]] = ktdf.create_token : !ktdf.token
 // CHECK-NEXT:                     %[[CREATE_TOKEN_3:.*]] = ktdf.create_token : !ktdf.token
 // CHECK-NEXT:                     ktdf_lowering.execute_on %[[QUERY_MAP_2]], %[[QUERY_MAP_3]] {
+// CHECK-NEXT:                       %[[CMPI_0:.*]] = arith.cmpi ne, %[[VAL_6]], %[[CONSTANT_19]] : index
+// CHECK-NEXT:                       scf.if %[[CMPI_0]] {
+// CHECK-NEXT:                         ktdf_lowering.signal %[[QUERY_MAP_6]], %[[QUERY_MAP_7]], %[[QUERY_MAP_2]], %[[QUERY_MAP_3]]
+// CHECK-NEXT:                       }
 // CHECK-NEXT:                       ktdf.data_transfer from %[[SELECT_MEMREF_0]]{{\[}}%[[VAL_4]], %[[VAL_6]], 0, 0, 0, 0] size [1, 1, 1, 1, 1, 64] to %[[FIFO_0]]#0 size [64] : memref<?x?x1x1x1x64xf16, "L1">, !ktdf.fifo.slot<"L1LU" -> "SFU", 64xf16>
 // CHECK-NEXT:                       ktdf.data_transfer from %[[UNREALIZED_CONVERSION_CAST_0]][0, 0] size [1, 64] to %[[FIFO_0]]#1 size [64] : memref<1x64xf16, "L1">, !ktdf.fifo.slot<"L1LU" -> "SFU", 64xf16>
 // CHECK-NEXT:                     }
@@ -156,6 +160,11 @@
 // CHECK-NEXT:                     }
 // CHECK-NEXT:                     ktdf_lowering.execute_on %[[QUERY_MAP_6]], %[[QUERY_MAP_7]] {
 // CHECK-NEXT:                       ktdf.data_transfer from %[[FIFO_1]] size [64] to %[[SELECT_MEMREF_1]]{{\[}}%[[VAL_4]], %[[VAL_6]], 0, 0, 0, 0, 0] size [1, 1, 1, 1, 1, 1, 64] : !ktdf.fifo.slot<"SFU" -> "L1SU", 64xf16>, memref<?x?x1x1x1x1x64xf16, "L1">
+// CHECK-NEXT:                       %[[SUBI_0:.*]] = arith.subi %[[TILING_1]], %[[CONSTANT_20]] : index
+// CHECK-NEXT:                       %[[CMPI_1:.*]] = arith.cmpi ne, %[[VAL_6]], %[[SUBI_0]] : index
+// CHECK-NEXT:                       scf.if %[[CMPI_1]] {
+// CHECK-NEXT:                         ktdf_lowering.signal %[[QUERY_MAP_6]], %[[QUERY_MAP_7]], %[[QUERY_MAP_2]], %[[QUERY_MAP_3]]
+// CHECK-NEXT:                       }
 // CHECK-NEXT:                     }
 // CHECK-NEXT:                   }
 // CHECK-NEXT:                 }

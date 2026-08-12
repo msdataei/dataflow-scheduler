@@ -46,6 +46,7 @@
 #include "ktir/Dialect/KTDP/KTDP.h"
 #include "llvm/Support/DebugLog.h"
 #include "mlir/Dialect/Func/IR/FuncOps.h"
+#include "mlir/Dialect/Linalg/IR/Linalg.h"
 #include "mlir/Dialect/SCF/IR/SCF.h"
 #include "mlir/IR/Builders.h"
 #include "mlir/IR/BuiltinOps.h"
@@ -62,6 +63,81 @@ namespace scheduler {
 }  // namespace scheduler
 
 namespace {
+
+// ---------------------------------------------------------------------------
+// Augment global_dag with cross-iteration back-edges and populate
+// back_edges_out for every pipeline whose linalg.generic compute stage sits
+// inside a non-trivial scf.for that is itself enclosed by a ktdf.parallel.
+//
+// Search rule (walking up from the pipeline):
+//   - Stop at ktdf.parallel or func::FuncOp — the loop must be between the
+//     pipeline and the ktdf.parallel, i.e. inside the parallel body.
+//   - A loop found before hitting that boundary is the enclosing_for.
+//   - Skip if the loop has a static trip count <= 1 (no back-edge needed).
+//
+// For each qualifying pipeline the back-edge is:
+//   store_stage (token-successor of compute_stage) → load_stage (predecessor)
+// injected into global_dag so computeScratchpadConflicts fires on the edge,
+// while back_edges_out lets insertSignals emit guarded signals instead of the
+// unconditional post-producer signal used for normal edges.
+// ---------------------------------------------------------------------------
+static void addScfForPipelineBackEdges(
+    mlir::func::FuncOp func, mlir::ktdf::StageDependencyDAG& global_dag,
+    llvm::SmallVector<BackEdgeInfo>& back_edges_out) {
+  func.walk([&](mlir::linalg::GenericOp generic) {
+    // Step 1: find the immediately enclosing ktdf.stage (compute_stage).
+    mlir::Operation* p = generic->getParentOp();
+    while (p && !mlir::isa<mlir::ktdf::StageOp>(p)) p = p->getParentOp();
+    auto compute_stage = mlir::dyn_cast<mlir::ktdf::StageOp>(p);
+    assert(compute_stage && "linalg.generic must be inside a ktdf.stage");
+
+    // Step 2/3: walk up from compute_stage's parent pipeline looking for an
+    // scf.for.  Stop at ktdf.parallel or func::FuncOp — the loop must be
+    // between the pipeline and the enclosing parallel.
+    auto pipeline = compute_stage->getParentOfType<mlir::ktdf::PipelineOp>();
+    assert(pipeline && "compute_stage must be inside a ktdf.pipeline");
+
+    mlir::scf::ForOp enclosing_for;
+    for (mlir::Operation* anc = pipeline->getParentOp(); anc;
+         anc = anc->getParentOp()) {
+      if (mlir::isa<mlir::ktdf::ParallelOp, mlir::func::FuncOp>(anc)) break;
+      if (auto for_op = mlir::dyn_cast<mlir::scf::ForOp>(anc)) {
+        enclosing_for = for_op;
+        break;
+      }
+    }
+    // No backedges if no enclosing loop
+    if (!enclosing_for) return;
+
+    // Step 4: skip trivial loops (trip count known to be <= 1).
+    if (auto tc = scheduler::getStaticTripCount(enclosing_for); tc && *tc <= 1)
+      return;
+
+    // Steps 5+6: look up load_stage and store_stage directly from global_dag.
+    // compute_stage is a leaf node in global_dag (no nested pipeline), so its
+    // predecessor entry is the load leaf stage and its successor is the store
+    // leaf stage.
+    mlir::Operation* compute_op = compute_stage.getOperation();
+
+    auto pred_it = global_dag.predecessors.find(compute_op);
+    if (pred_it == global_dag.predecessors.end() || pred_it->second.empty())
+      return;
+    auto* load_stage_op = pred_it->second.front();
+
+    auto succ_it = global_dag.successors.find(compute_op);
+    if (succ_it == global_dag.successors.end() || succ_it->second.empty())
+      return;
+    auto* store_stage_op = succ_it->second.front();
+
+    LDBG(1) << "  Adding scf.for pipeline back-edge: store_stage -> "
+               "load_stage (cross-iteration scratchpad RAW)";
+    global_dag.successors[store_stage_op].push_back(load_stage_op);
+    global_dag.predecessors[load_stage_op].push_back(store_stage_op);
+
+    back_edges_out.push_back(
+        BackEdgeInfo{store_stage_op, load_stage_op, enclosing_for});
+  });
+}
 
 struct KTDFToKTDFLoweringPass
     : public impl::KTDFToKTDFLoweringPassBase<KTDFToKTDFLoweringPass> {
@@ -213,12 +289,19 @@ struct KTDFToKTDFLoweringPass
 
       // Step 6: Build the global flat stage DAG once, spanning all nesting
       // levels. Nodes are leaf StageOps only; used for conflict detection (Step
-      // 7) and signal insertion (Step 9).
+      // 7) and signal insertion (Step 8).
       mlir::ktdf::StageDependencyDAG global_dag;
       if (mlir::failed(mlir::ktdf::buildGlobalStageDAG(func, global_dag))) {
         func.emitError("failed to build global stage DAG");
         return signalPassFailure();
       }
+
+      // Step 6b: Augment global_dag with cross-iteration back-edges for every
+      // pipeline whose linalg.generic compute stage sits inside a non-trivial
+      // scf.for enclosed by a ktdf.parallel.  Also collects BackEdgeInfo so
+      // insertSignals can emit loop-IV-guarded signals for these edges.
+      llvm::SmallVector<BackEdgeInfo> back_edges;
+      addScfForPipelineBackEdges(func, global_dag, back_edges);
 
       // Step 7: Compute scratchpad conflicts across all pipelines using the
       // global leaf-stage DAG.
@@ -233,9 +316,10 @@ struct KTDFToKTDFLoweringPass
       LDBG(1) << "Number of scratchpad conflicts found: " << conflicts.size();
 
       // Step 8: Insert signal operations for all conflicting global DAG edges,
-      // before any pipeline transformation mutates the IR.
+      // before any pipeline transformation mutates the IR.  Back-edge signals
+      // are wrapped in scf.if guards (iv != lb / iv != ub-step).
       if (mlir::failed(insertSignals(func.getLoc(), stage_to_units, global_dag,
-                                     conflicts, phase2_builder))) {
+                                     conflicts, back_edges, phase2_builder))) {
         return signalPassFailure();
       }
 

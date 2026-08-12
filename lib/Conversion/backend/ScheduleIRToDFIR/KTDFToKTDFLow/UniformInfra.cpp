@@ -215,8 +215,8 @@ llvm::FailureOr<mlir::Value> UniformInfra::buildSignalQueryMap(
   // The program_unit operands are the keys for the new mapping
   mlir::ValueRange pu_operands = program_unit.getUnits();
 
-  // Build new mapping: [%cur_unit_core0 -> %other_unit_core0, %cur_unit_core1
-  // -> %other_unit_core1, ...]
+  // Build new mapping: [%cur_unit_core0 -> %other_unit_core0,
+  //                      %cur_unit_core1 -> %other_unit_core1, ...]
   llvm::SmallVector<mlir::Value> new_keys;
   llvm::SmallVector<mlir::Value> new_values;
 

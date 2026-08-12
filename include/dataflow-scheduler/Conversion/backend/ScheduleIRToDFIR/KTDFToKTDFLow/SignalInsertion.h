@@ -24,19 +24,39 @@
 #include "dataflow-scheduler/Conversion/backend/ScheduleIRToDFIR/KTDFToKTDFLow/StageToUnitsMap.h"
 #include "dataflow-scheduler/Dialect/KTDF/Analysis/GlobalStageDAG.h"
 #include "dataflow-scheduler/Utils/SchedulerExtContext.h"
+#include "llvm/ADT/DenseMap.h"
 #include "llvm/ADT/SmallVector.h"
+#include "mlir/Dialect/SCF/IR/SCF.h"
 #include "mlir/IR/Builders.h"
+#include "mlir/IR/Operation.h"
 
 namespace scheduler {
 
+/// Metadata for a cross-iteration pipeline back-edge.
+/// store_stage writes a shared scratchpad; load_stage reads it on the next
+/// iteration.  The enclosing scf.for is stored so the signal guards can be
+/// built from its lower-bound and upper-bound/step.
+struct BackEdgeInfo {
+  mlir::Operation* store_stage;  ///< leaf stage (producer, writes scratchpad)
+  mlir::Operation* load_stage;   ///< root stage (consumer, reads scratchpad)
+  mlir::scf::ForOp for_op;       ///< enclosing loop that carries the back-edge
+};
+
 /// Insert signal operations for all scratchpad conflicts found in global_dag.
-/// Iterates the global leaf-stage DAG edges directly; inserts a SignalOp after
-/// each leaf producer stage for every conflicting leaf-to-leaf edge.
+///
+/// For normal (intra-iteration) edges a single unconditional SignalOp is
+/// placed after the producer stage.
+///
+/// For cross-iteration back-edges recorded in `back_edges` two guarded
+/// SignalOps are emitted instead:
+///   - at the start of load_stage body:  scf.if (iv != lb)  { signal }
+///   - at the end   of store_stage body: scf.if (iv != ub-step) { signal }
 mlir::LogicalResult insertSignals(
     mlir::Location loc, const StageToUnitsMap& stage_to_units,
     const mlir::ktdf::StageDependencyDAG& global_dag,
     const std::map<std::pair<mlir::Operation*, mlir::Operation*>,
                    llvm::SmallVector<scheduler::ResourceType, 2>>& conflicts,
+    const llvm::SmallVector<BackEdgeInfo>& back_edges,
     mlir::OpBuilder& builder);
 
 }  // namespace scheduler
