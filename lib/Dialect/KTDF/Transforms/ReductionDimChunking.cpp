@@ -141,6 +141,74 @@ static ktdf::StageOp findStoreStage(ktdf::PipelineOp pipeline,
 }
 
 // ---------------------------------------------------------------------------
+// Helper: locate the input memref fed into the load stage by tracing the
+// linalg.generic input back through read_from_fifo to the data_transfer in
+// the load stage whose destination is that fifo slot.
+//
+// generic.getInputs()[0]
+//   → defined by ReadFromFifoOp (fifo_in slot)
+//   → DataTransferOp in load_stage with destination == fifo_in slot
+//   → getSource() is the input memref
+//
+// Returns {load_transfer, read_from_fifo}, or {nullptr, nullptr} on failure.
+// ---------------------------------------------------------------------------
+static std::pair<ktdf::DataTransferOp, ktdf::ReadFromFifoOp> findLoadTransfer(
+    ktdf::StageOp load_stage, linalg::GenericOp generic_op) {
+  auto read_from_fifo =
+      generic_op.getInputs().front().getDefiningOp<ktdf::ReadFromFifoOp>();
+  if (!read_from_fifo) return {nullptr, nullptr};
+
+  Value fifo_in = read_from_fifo.getFifoSlot();
+  ktdf::DataTransferOp load_transfer;
+  load_stage.getBody()->walk([&](ktdf::DataTransferOp dt) {
+    if (dt.isSourceMemRef() && dt.isDestFifo() &&
+        dt.getDestination() == fifo_in) {
+      load_transfer = dt;
+      return WalkResult::interrupt();
+    }
+    return WalkResult::advance();
+  });
+  return {load_transfer, read_from_fifo};
+}
+
+// ---------------------------------------------------------------------------
+// Helper: locate the partial-accumulation memref in the store stage by
+// tracing the linalg.generic result through write_to_fifo to the
+// data_transfer in the store stage whose source is that fifo slot.
+//
+// generic.getResult(0)
+//   → consumed by WriteToFifoOp (fifo_out slot)
+//   → DataTransferOp in store_stage with source == fifo_out slot
+//   → getDestination() is the partial/output memref
+//
+// Returns {store_transfer, write_to_fifo}, or {nullptr, nullptr} on failure.
+// ---------------------------------------------------------------------------
+static std::pair<ktdf::DataTransferOp, ktdf::WriteToFifoOp> findStoreTransfer(
+    ktdf::StageOp compute_stage, ktdf::StageOp store_stage,
+    linalg::GenericOp generic_op) {
+  ktdf::WriteToFifoOp write_to_fifo;
+  compute_stage.getBody()->walk([&](ktdf::WriteToFifoOp write) {
+    if (write.getData() == generic_op.getResult(0)) {
+      write_to_fifo = write;
+      return WalkResult::interrupt();
+    }
+    return WalkResult::advance();
+  });
+  if (!write_to_fifo) return {nullptr, nullptr};
+
+  Value fifo_out = write_to_fifo.getFifoSlot();
+  ktdf::DataTransferOp store_transfer;
+  store_stage.getBody()->walk([&](ktdf::DataTransferOp dt) {
+    if (dt.isSourceFifo() && dt.isDestMemRef() && dt.getSource() == fifo_out) {
+      store_transfer = dt;
+      return WalkResult::interrupt();
+    }
+    return WalkResult::advance();
+  });
+  return {store_transfer, write_to_fifo};
+}
+
+// ---------------------------------------------------------------------------
 // Helper: build a ktdf.private with FIFO slots + two tokens and yield them.
 //
 // Without partial FIFO slot (partial_slot_type == nullopt):
@@ -419,61 +487,43 @@ struct ReductionDimChunkingPass
     Location loc = inner_pipeline.getLoc();
 
     // ------------------------------------------------------------------
-    // Step 1: Reuse the existing outer-pipeline L1 output buffer for partial
-    // accumulation.
+    // Step 1: Trace dataflow from linalg.generic ins/outs to find the
+    // load/store data_transfer ops and the FIFO slot ops they connect to.
+    //
+    //   generic ins[0] ← ReadFromFifoOp(fifo_in) ←
+    //   DataTransferOp(src=input_memref) generic result →
+    //   WriteToFifoOp(fifo_out)  → DataTransferOp(dst=partial_memref)
     // ------------------------------------------------------------------
-    ktdf::DataTransferOp store_transfer;
-    store_stage.getBody()->walk([&](ktdf::DataTransferOp dt) {
-      if (dt.isDestMemRef()) store_transfer = dt;
-    });
-    if (!store_transfer) {
-      inner_pipeline.emitError(PASS_NAME
-                               ": no memref-dest data_transfer in "
-                               "store stage");
-      return failure();
-    }
-    Value partial_memref = store_transfer.getDestination();
-    auto output_memref_type = cast<MemRefType>(partial_memref.getType());
-
-    // ------------------------------------------------------------------
-    // Step 2: Extract the input memref and derive the compute stage FIFO slot
-    // types from the linalg.generic dataflow.
-    // ------------------------------------------------------------------
-    ktdf::DataTransferOp load_transfer;
-    load_stage.getBody()->walk([&](ktdf::DataTransferOp transfer) {
-      if (transfer.isSourceMemRef() && transfer.isDestFifo()) {
-        load_transfer = transfer;
-      }
-    });
-    if (!load_transfer) {
-      inner_pipeline.emitError(PASS_NAME
-                               ": no memref-to-fifo transfer in "
-                               "load stage");
-      return failure();
-    }
-    Value input_memref = load_transfer.getSource();
-
-    auto read_from_fifo =
-        generic_op.getInputs().front().getDefiningOp<ktdf::ReadFromFifoOp>();
+    auto [load_transfer, read_from_fifo] =
+        findLoadTransfer(load_stage, generic_op);
     if (!read_from_fifo) {
       inner_pipeline.emitError(
           PASS_NAME ": generic input is not produced by read_from_fifo");
       return failure();
     }
+    if (!load_transfer) {
+      inner_pipeline.emitError(PASS_NAME
+                               ": no memref-to-fifo transfer feeding "
+                               "the generic's fifo_in slot in load stage");
+      return failure();
+    }
+    Value input_memref = load_transfer.getSource();
 
-    ktdf::WriteToFifoOp write_to_fifo;
-    compute_stage.getBody()->walk([&](ktdf::WriteToFifoOp write) {
-      if (write.getData() == generic_op.getResult(0)) {
-        write_to_fifo = write;
-        return WalkResult::interrupt();
-      }
-      return WalkResult::advance();
-    });
+    auto [store_transfer, write_to_fifo] =
+        findStoreTransfer(compute_stage, store_stage, generic_op);
     if (!write_to_fifo) {
       inner_pipeline.emitError(
           PASS_NAME ": generic result is not consumed by write_to_fifo");
       return failure();
     }
+    if (!store_transfer) {
+      inner_pipeline.emitError(PASS_NAME
+                               ": no fifo-to-memref transfer consuming "
+                               "the generic's fifo_out slot in store stage");
+      return failure();
+    }
+    Value partial_memref = store_transfer.getDestination();
+    auto output_memref_type = cast<MemRefType>(partial_memref.getType());
 
     auto in_fifo_type =
         dyn_cast<ktdf::FifoSlotType>(read_from_fifo.getFifoSlot().getType());
