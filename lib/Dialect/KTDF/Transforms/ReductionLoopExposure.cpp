@@ -322,7 +322,7 @@ NestedForResult buildNestedForLoops(OpBuilder& builder, Location loc,
 // emits an error on `inner_pipeline` if selection fails.
 // ---------------------------------------------------------------------------
 Value findFifoInTransfer(ktdf::PipelineOp inner_pipeline,
-                         ktdf::StageOp load_stage, ktdf::StageOp compute_stage,
+                         ktdf::StageOp load_stage,
                          linalg::GenericOp generic_op) {
   SmallVector<ktdf::DataTransferOp> fifo_dest_transfers;
   load_stage.getBody()->walk([&](ktdf::DataTransferOp xfer) {
@@ -343,26 +343,16 @@ Value findFifoInTransfer(ktdf::PipelineOp inner_pipeline,
   // the FIFO slot consumed by linalg.generic ins().
   Value generic_input = generic_op.getInputs().front();
 
-  // Direct case: the input is produced immediately by a read_from_fifo.
-  Value input_fifo;
-  if (auto read_op = generic_input.getDefiningOp<ktdf::ReadFromFifoOp>()) {
-    input_fifo = read_op.getFifoSlot();
-  } else {
-    // Fallback: scan every read_from_fifo inside the compute stage.
-    compute_stage.getBody()->walk([&](ktdf::ReadFromFifoOp read_op) {
-      if (read_op.getResult() == generic_input) {
-        input_fifo = read_op.getFifoSlot();
-      }
-    });
-  }
-
-  if (!input_fifo) {
+  // The input to linalg.generic must be directly produced by a read_from_fifo.
+  auto read_op = generic_input.getDefiningOp<ktdf::ReadFromFifoOp>();
+  if (!read_op) {
     inner_pipeline.emitError(
         PASS_NAME
         ": multiple FIFO-dest transfers in load stage and cannot "
         "identify which feeds linalg.generic ins()");
     return {};
   }
+  Value input_fifo = read_op.getFifoSlot();
 
   for (auto xfer : fifo_dest_transfers) {
     if (xfer.getDestination() == input_fifo) {
@@ -506,8 +496,8 @@ struct ReductionLoopExposurePass
 
     // From the load stage, find the data_transfer whose FIFO destination feeds
     // the linalg.generic inputs in the compute stage.
-    Value orig_fifo_in = findFifoInTransfer(inner_pipeline, load_stage,
-                                            compute_stage, generic_op);
+    Value orig_fifo_in =
+        findFifoInTransfer(inner_pipeline, load_stage, generic_op);
     if (!orig_fifo_in) return failure();
 
     // Validate that fifo_in is a ktdf.private result.
