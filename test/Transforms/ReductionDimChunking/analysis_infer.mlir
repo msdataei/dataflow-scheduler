@@ -79,29 +79,30 @@
 // CHECK-NEXT:             scf.for %[[VAL_4:.*]] = %[[CONSTANT_4]] to %[[CONSTANT_6]] step %[[CONSTANT_5]] {
 // CHECK-NEXT:               %[[CMPI_0:.*]] = arith.cmpi eq, %[[VAL_4]], %[[CONSTANT_4]] : index
 // CHECK-NEXT:               ktdf.pipeline {
-// CHECK-NEXT:                 %[[PRIVATE_1:.*]]:4 = ktdf.private -> (!ktdf.fifo.slot<"L1LU" -> "SFU", 524288xf16>, !ktdf.fifo.slot<"SFU" -> "L1SU", 64xf16>, !ktdf.token, !ktdf.token) {
+// CHECK-NEXT:                 %[[PRIVATE_1:.*]]:5 = ktdf.private -> (!ktdf.fifo.slot<"L1LU" -> "SFU", 524288xf16>, !ktdf.fifo.slot<"L1LU" -> "SFU", 64xf16>, !ktdf.fifo.slot<"SFU" -> "L1SU", 64xf16>, !ktdf.token, !ktdf.token) {
 // CHECK-NEXT:                   %[[FIFO_0:.*]] = ktdf.fifo.allocate() -> !ktdf.fifo.slot<"L1LU" -> "SFU", 524288xf16>
-// CHECK-NEXT:                   %[[FIFO_1:.*]] = ktdf.fifo.allocate() -> !ktdf.fifo.slot<"SFU" -> "L1SU", 64xf16>
+// CHECK-NEXT:                   %[[FIFO_1:.*]] = ktdf.fifo.allocate() -> !ktdf.fifo.slot<"L1LU" -> "SFU", 64xf16>
+// CHECK-NEXT:                   %[[FIFO_2:.*]] = ktdf.fifo.allocate() -> !ktdf.fifo.slot<"SFU" -> "L1SU", 64xf16>
 // CHECK-NEXT:                   %[[CREATE_TOKEN_2:.*]] = ktdf.create_token : !ktdf.token
 // CHECK-NEXT:                   %[[CREATE_TOKEN_3:.*]] = ktdf.create_token : !ktdf.token
-// CHECK-NEXT:                   ktdf.private_yield %[[FIFO_0]], %[[FIFO_1]], %[[CREATE_TOKEN_2]], %[[CREATE_TOKEN_3]] : !ktdf.fifo.slot<"L1LU" -> "SFU", 524288xf16>, !ktdf.fifo.slot<"SFU" -> "L1SU", 64xf16>, !ktdf.token, !ktdf.token
+// CHECK-NEXT:                   ktdf.private_yield %[[FIFO_0]], %[[FIFO_1]], %[[FIFO_2]], %[[CREATE_TOKEN_2]], %[[CREATE_TOKEN_3]] : !ktdf.fifo.slot<"L1LU" -> "SFU", 524288xf16>, !ktdf.fifo.slot<"L1LU" -> "SFU", 64xf16>, !ktdf.fifo.slot<"SFU" -> "L1SU", 64xf16>, !ktdf.token, !ktdf.token
 // CHECK-NEXT:                 }
-// CHECK-NEXT:                 ktdf.stage depends_in(none) depends_out(%[[VAL_5:.*]]#2) {
+// CHECK-NEXT:                 ktdf.stage depends_in(none) depends_out(%[[VAL_5:.*]]#3) {
 // CHECK-NEXT:                   %[[SUBI_1:.*]] = arith.subi %[[VAL_3]], %[[CONSTANT_4]] : index
 // CHECK-NEXT:                   %[[DIVSI_1:.*]] = arith.divsi %[[SUBI_1]], %[[CONSTANT_5]] : index
 // CHECK-NEXT:                   ktdf.data_transfer from %[[VAL_2]]#0{{\[}}%[[DIVSI_1]], %[[CONSTANT_4]], %[[VAL_4]] * 8192, %[[CONSTANT_4]]] size [1, 1, 8192, 64] to %[[VAL_5]]#0 size [524288] : memref<2x1x32768x64xf16, "L1">, !ktdf.fifo.slot<"L1LU" -> "SFU", 524288xf16>
 // CHECK-NEXT:                   scf.if %[[CMPI_0]] {
 // CHECK-NEXT:                   } else {
-// CHECK-NEXT:                     ktdf.data_transfer from %[[VAL_2]]#1{{\[}}%[[DIVSI_1]], %[[CONSTANT_4]], %[[CONSTANT_4]]] size [1, 1, 64] to %[[VAL_5]]#1 size [64] : memref<2x1x64xf16, "L1">, !ktdf.fifo.slot<"SFU" -> "L1SU", 64xf16>
+// CHECK-NEXT:                     ktdf.data_transfer from %[[VAL_2]]#1{{\[}}%[[DIVSI_1]], %[[CONSTANT_4]], %[[CONSTANT_4]]] size [1, 1, 64] to %[[VAL_5]]#1 size [64] : memref<2x1x64xf16, "L1">, !ktdf.fifo.slot<"L1LU" -> "SFU", 64xf16>
 // CHECK-NEXT:                   }
 // CHECK-NEXT:                 } {applicable_units = ["L1LU"]}
-// CHECK-NEXT:                 ktdf.stage depends_in(%[[VAL_6:.*]]#2) depends_out(%[[VAL_6]]#3) {
+// CHECK-NEXT:                 ktdf.stage depends_in(%[[VAL_6:.*]]#3) depends_out(%[[VAL_6]]#4) {
 // CHECK-NEXT:                   %[[READ_FROM_FIFO_0:.*]] = ktdf.read_from_fifo %[[VAL_6]]#0 : <"L1LU" -> "SFU", 524288xf16> -> tensor<1x8192x64xf16>
 // CHECK-NEXT:                   %[[IF_0:.*]] = scf.if %[[CMPI_0]] -> (tensor<1x64xf16>) {
 // CHECK-NEXT:                     %[[EMPTY_0:.*]] = tensor.empty() : tensor<1x64xf16>
 // CHECK-NEXT:                     scf.yield %[[EMPTY_0]] : tensor<1x64xf16>
 // CHECK-NEXT:                   } else {
-// CHECK-NEXT:                     %[[READ_FROM_FIFO_1:.*]] = ktdf.read_from_fifo %[[VAL_6]]#1 : <"SFU" -> "L1SU", 64xf16> -> tensor<1x64xf16>
+// CHECK-NEXT:                     %[[READ_FROM_FIFO_1:.*]] = ktdf.read_from_fifo %[[VAL_6]]#1 : <"L1LU" -> "SFU", 64xf16> -> tensor<1x64xf16>
 // CHECK-NEXT:                     scf.yield %[[READ_FROM_FIFO_1]] : tensor<1x64xf16>
 // CHECK-NEXT:                   }
 // CHECK-NEXT:                   %[[GENERIC_0:.*]] = linalg.generic {indexing_maps = [#[[$ATTR_0]], #[[$ATTR_1]]], iterator_types = ["parallel", "reduction", "parallel"]} ins(%[[READ_FROM_FIFO_0]] : tensor<1x8192x64xf16>) outs(%[[IF_0]] : tensor<1x64xf16>) {
@@ -109,12 +110,12 @@
 // CHECK-NEXT:                     %[[ADDF_0:.*]] = arith.addf %[[VAL_7]], %[[VAL_8]] : f16
 // CHECK-NEXT:                     linalg.yield %[[ADDF_0]] : f16
 // CHECK-NEXT:                   } -> tensor<1x64xf16>
-// CHECK-NEXT:                   ktdf.write_to_fifo %[[GENERIC_0]], %[[VAL_6]]#1 : tensor<1x64xf16>, <"SFU" -> "L1SU", 64xf16>
+// CHECK-NEXT:                   ktdf.write_to_fifo %[[GENERIC_0]], %[[VAL_6]]#2 : tensor<1x64xf16>, <"SFU" -> "L1SU", 64xf16>
 // CHECK-NEXT:                 } {applicable_units = ["SFU"]}
-// CHECK-NEXT:                 ktdf.stage depends_in(%[[VAL_9:.*]]#3) depends_out(none) {
+// CHECK-NEXT:                 ktdf.stage depends_in(%[[VAL_9:.*]]#4) depends_out(none) {
 // CHECK-NEXT:                   %[[SUBI_2:.*]] = arith.subi %[[VAL_3]], %[[CONSTANT_4]] : index
 // CHECK-NEXT:                   %[[DIVSI_2:.*]] = arith.divsi %[[SUBI_2]], %[[CONSTANT_5]] : index
-// CHECK-NEXT:                   ktdf.data_transfer from %[[VAL_9]]#1 size [64] to %[[VAL_2]]#1{{\[}}%[[DIVSI_2]], %[[CONSTANT_4]], %[[CONSTANT_4]]] size [1, 1, 64] : !ktdf.fifo.slot<"SFU" -> "L1SU", 64xf16>, memref<2x1x64xf16, "L1">
+// CHECK-NEXT:                   ktdf.data_transfer from %[[VAL_9]]#2 size [64] to %[[VAL_2]]#1{{\[}}%[[DIVSI_2]], %[[CONSTANT_4]], %[[CONSTANT_4]]] size [1, 1, 64] : !ktdf.fifo.slot<"SFU" -> "L1SU", 64xf16>, memref<2x1x64xf16, "L1">
 // CHECK-NEXT:                 } {applicable_units = ["L1SU"]}
 // CHECK-NEXT:               }
 // CHECK-NEXT:             }

@@ -40,11 +40,11 @@
 //
 //   Load stage   : always transfers the input chunk slice to fifo_in.
 //                  When !condition, additionally transfers the partial
-//                  accumulator (the existing L1 output buffer) to fifo_out
+//                  accumulator (the existing L1 output buffer) to fifo_partial
 //                  so the compute stage can read it back.
 //   Compute stage: when condition, initialises the output tensor with
 //                  tensor.empty; otherwise reads the partial result from
-//                  fifo_out.  The linalg.generic and write_to_fifo are
+//                  fifo_partial.  The linalg.generic and write_to_fifo are
 //                  unconditional.
 //   Store stage  : unconditionally writes fifo_out back to the L1 output
 //                  buffer.
@@ -564,25 +564,36 @@ struct ReductionDimChunkingPass
     OpBuilder pipe_bldr(phase_pipeline.getBody(),
                         phase_pipeline.getBody()->end());
 
-    // Private: 1 in-slot, 0 partial-slots, 1 out-slot, 2 tokens.
+    // Build a partial-slot FIFO type with the Load→Compute direction
+    // (same src/dest as fifo_in) but carrying output-tensor-sized elements.
+    auto partial_fifo_type = ktdf::FifoSlotType::get(
+        context, in_fifo_type.getSrc(), in_fifo_type.getDest(),
+        out_fifo_type.getNumElements(), out_fifo_type.getElementType());
+
+    // Private: 1 in-slot, 1 partial-slot, 1 out-slot, 2 tokens.
+    //   fifo_in      (in-slot)      : Load → Compute  input chunk
+    //   fifo_partial (partial-slot) : Load → Compute  partial accumulator
+    //                                 (non-first iterations only)
+    //   fifo_out     (out-slot)     : Compute → Store reduction result
     auto slots = buildFifoPrivate(pipe_bldr, loc,
                                   /*n_in_slots=*/1, chunk_in_fifo_type,
-                                  /*n_partial_slots=*/0, out_fifo_type,
+                                  /*n_partial_slots=*/1, partial_fifo_type,
                                   /*n_out_slots=*/1, out_fifo_type,
                                   /*n_tokens=*/2);
     Value fifo_in = slots.inSlot(0);
+    Value fifo_partial = slots.partialSlot(0);
     Value fifo_out = slots.outSlot(0);
     Value tok0 = slots.token(0);
     Value tok1 = slots.token(1);
 
     buildLoadStage(pipe_bldr, loc, tok0, load_units, condition, batch_iv,
                    input_memref, input_memref_type, partial_memref,
-                   output_memref_type, out_fifo_type, fifo_in, fifo_out,
+                   output_memref_type, partial_fifo_type, fifo_in, fifo_partial,
                    chunk_fifo_elements, reduction_dims, chunk_sizes, dim_ivs,
                    c0, emit_l1_idx);
 
     buildComputeStage(pipe_bldr, loc, tok0, tok1, compute_units, condition,
-                      fifo_in, fifo_out, chunk_input_tensor_type,
+                      fifo_in, fifo_partial, fifo_out, chunk_input_tensor_type,
                       output_tensor_type, generic_op);
 
     buildStoreStage(pipe_bldr, loc, tok1, store_units, batch_iv, partial_memref,
@@ -601,7 +612,8 @@ struct ReductionDimChunkingPass
   //
   // The load stage always transfers one input chunk slice (memref → fifo_in).
   // On non-first iterations (!condition) it also feeds the existing partial
-  // accumulator (partial_memref → fifo_out) so the compute stage can read it.
+  // accumulator (partial_memref → fifo_partial) so the compute stage can read
+  // it.
   //
   // Input memref layout: dim-0 is the batch/L1 slot index; dims 1..rank-1
   // map to linalg.generic iterator dims 0..rank-2.  For each memref dim i
@@ -613,8 +625,8 @@ struct ReductionDimChunkingPass
       OpBuilder& pipe_bldr, Location loc, Value tok0, ArrayAttr load_units,
       Value condition, Value batch_iv, Value input_memref,
       MemRefType input_memref_type, Value partial_memref,
-      MemRefType output_memref_type, ktdf::FifoSlotType out_fifo_type,
-      Value fifo_in, Value fifo_out, int64_t chunk_fifo_elements,
+      MemRefType output_memref_type, ktdf::FifoSlotType partial_fifo_type,
+      Value fifo_in, Value fifo_partial, int64_t chunk_fifo_elements,
       ArrayRef<int64_t> reduction_dims, ArrayRef<int64_t> chunk_sizes,
       ArrayRef<Value> dim_ivs, Value c0,
       llvm::function_ref<Value(OpBuilder&, Location, Value)> emit_l1_idx) {
@@ -680,8 +692,8 @@ struct ReductionDimChunkingPass
         b, loc, input_memref, input_map, src_indices, src_static_sizes, fifo_in,
         AffineMap{}, ValueRange{}, ArrayRef<int64_t>{chunk_fifo_elements});
 
-    // On non-first iterations, feed the partial accumulator into fifo_out so
-    // the compute stage can read it back as the running result.
+    // On non-first iterations, feed the partial accumulator into fifo_partial
+    // so the compute stage can read it back as the running result.
     auto if_op =
         scf::IfOp::create(b, loc, /*resultTypes=*/TypeRange{}, condition,
                           /*withElseRegion=*/true);
@@ -703,9 +715,9 @@ struct ReductionDimChunkingPass
       }
       ktdf::DataTransferOp::create(
           else_bldr, loc, partial_memref, partial_id, partial_src_indices,
-          partial_src_sizes, fifo_out, AffineMap{}, ValueRange{},
+          partial_src_sizes, fifo_partial, AffineMap{}, ValueRange{},
           ArrayRef<int64_t>{
-              static_cast<int64_t>(out_fifo_type.getNumElements())});
+              static_cast<int64_t>(partial_fifo_type.getNumElements())});
     }
   }
 
@@ -714,12 +726,12 @@ struct ReductionDimChunkingPass
   //
   // On the first iteration (condition == true) the output is initialised with
   // tensor.empty.  On subsequent iterations the partial result is read from
-  // fifo_out.  The cloned linalg.generic and the write_to_fifo are
+  // fifo_partial.  The cloned linalg.generic and the write_to_fifo are
   // unconditional.
   // -----------------------------------------------------------------------
   void buildComputeStage(OpBuilder& pipe_bldr, Location loc, Value tok0,
                          Value tok1, ArrayAttr compute_units, Value condition,
-                         Value fifo_in, Value fifo_out,
+                         Value fifo_in, Value fifo_partial, Value fifo_out,
                          RankedTensorType chunk_input_tensor_type,
                          RankedTensorType output_tensor_type,
                          linalg::GenericOp generic_op) {
@@ -734,7 +746,7 @@ struct ReductionDimChunkingPass
         ktdf::ReadFromFifoOp::create(b, loc, chunk_input_tensor_type, fifo_in);
 
     // Select the output tensor: tensor.empty on first iteration, or the
-    // partial result read from fifo_out on subsequent iterations.
+    // partial result read from fifo_partial on subsequent iterations.
     auto if_op = scf::IfOp::create(b, loc, TypeRange{output_tensor_type},
                                    condition, /*withElseRegion=*/true);
     {
@@ -749,7 +761,7 @@ struct ReductionDimChunkingPass
       OpBuilder else_bldr =
           OpBuilder::atBlockBegin(&if_op.getElseRegion().front());
       Value partial_tensor = ktdf::ReadFromFifoOp::create(
-          else_bldr, loc, output_tensor_type, fifo_out);
+          else_bldr, loc, output_tensor_type, fifo_partial);
       scf::YieldOp::create(else_bldr, loc, partial_tensor);
     }
 
