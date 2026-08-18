@@ -1,5 +1,12 @@
 // RUN: dataflow-scheduler-opt --reduction-loop-exposure %s | FileCheck %s
 
+// This script is intended to make adding checks to a test case quick and easy.
+// It is *not* authoritative about what constitutes a good test. After using the
+// script, be sure to review and refine the generated checks. For example,
+// For comprehensive guidelines, see:
+//   * https://mlir.llvm.org/getting_started/TestingGuide/
+
+
 
 // CHECK: #[[$ATTR_0:.+]] = affine_map<(d0, d1, d2) -> (d0, d1, d2)>
 // CHECK: #[[$ATTR_1:.+]] = affine_map<(d0, d1, d2) -> (d0, d2)>
@@ -85,13 +92,13 @@
 // CHECK-NEXT:                       %[[DIVSI_2:.*]] = arith.divsi %[[VAL_4]], %[[CONSTANT_15]] : index
 // CHECK-NEXT:                       %[[REMSI_0:.*]] = arith.remsi %[[DIVSI_2]], %[[CONSTANT_16]] : index
 // CHECK-NEXT:                       %[[MULI_0:.*]] = arith.muli %[[REMSI_0]], %[[CONSTANT_14]] : index
-// CHECK-NEXT:                       ktdf.data_transfer from %[[VAL_2]]#0{{\[}}%[[DIVSI_1]], %[[CONSTANT_11]], %[[VAL_6]], %[[CONSTANT_11]]] size [1, 1, 1, 64] to %[[VAL_5]]#0 size [64] : memref<2x1x256x64xf16, "L1">, !ktdf.fifo.slot<"L1LU" -> "SFU", 64xf16>
+// CHECK-NEXT:                       ktdf.data_transfer from %[[VAL_2]]#0{{\[}}%[[DIVSI_1]], %[[CONSTANT_11]], %[[VAL_7]] + %[[VAL_6]], %[[CONSTANT_11]]] size [1, 1, 1, 64] to %[[VAL_5]]#0 size [64] : memref<2x1x256x64xf16, "L1">, !ktdf.fifo.slot<"L1LU" -> "SFU", 64xf16>
 // CHECK-NEXT:                       scf.if %[[CMPI_0]] {
 // CHECK-NEXT:                       } else {
-// CHECK-NEXT:                         ktdf.data_transfer from %[[VAL_2]]#1{{\[}}%[[DIVSI_1]], %[[VAL_6]], %[[CONSTANT_11]]] size [1, 1, 64] to %[[VAL_5]]#1 size [64] : memref<2x1x64xf16, "L1">, !ktdf.fifo.slot<"SFU" -> "L1SU", 64xf16>
+// CHECK-NEXT:                         ktdf.data_transfer from %[[VAL_2]]#1{{\[}}%[[DIVSI_1]], %[[VAL_7]] + %[[VAL_6]], %[[CONSTANT_11]]] size [1, 1, 64] to %[[VAL_5]]#1 size [64] : memref<2x1x64xf16, "L1">, !ktdf.fifo.slot<"SFU" -> "L1SU", 64xf16>
 // CHECK-NEXT:                       }
 // CHECK-NEXT:                     }
-// CHECK-NEXT:                   }
+// CHECK-NEXT:                   } {loop_type = #ktdf.loop_type<reduction_loop>}
 // CHECK-NEXT:                 } {applicable_units = ["L1LU"]}
 // CHECK-NEXT:                 ktdf.stage depends_in(%[[VAL_8:.*]]#2) depends_out(%[[VAL_8]]#3) {
 // CHECK-NEXT:                   %[[EMPTY_0:.*]] = tensor.empty() : tensor<1x64xf16>
@@ -125,7 +132,7 @@
 // CHECK-NEXT:                         }
 // CHECK-NEXT:                       }
 // CHECK-NEXT:                     }
-// CHECK-NEXT:                   }
+// CHECK-NEXT:                   } {loop_type = #ktdf.loop_type<reduction_loop>}
 // CHECK-NEXT:                 } {applicable_units = ["L1SU"]}
 // CHECK-NEXT:               }
 // CHECK-NEXT:             }
@@ -142,6 +149,8 @@
 // CHECK-NEXT:       return
 // CHECK-NEXT:     }
 // CHECK-NEXT:   }
+
+
 
 
 

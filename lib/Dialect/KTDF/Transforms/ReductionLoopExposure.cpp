@@ -57,6 +57,7 @@
 #include "dataflow-scheduler/Dialect/KTDF/KTDF.h"
 #include "dataflow-scheduler/Dialect/KTDF/Transforms/Passes.h"
 #include "dataflow-scheduler/Dialect/KTDF/Utils/Utils.h"
+#include "llvm/ADT/DenseSet.h"
 #include "llvm/Support/DebugLog.h"
 #include "mlir/Dialect/Arith/IR/Arith.h"
 #include "mlir/Dialect/Linalg/IR/Linalg.h"
@@ -393,6 +394,8 @@ struct ReductionLoopExposurePass
   // walking ops that we are about to rewrite.
   // -------------------------------------------------------------------------
   LogicalResult transformModule(ModuleOp module) {
+    // Use a DenseSet to avoid O(n²) duplicate checks.
+    llvm::DenseSet<ktdf::StageOp> seen;
     SmallVector<ktdf::StageOp> compute_stages;
     module.walk([&](linalg::GenericOp generic) {
       // Check if this generic has a reduction iterator.
@@ -404,16 +407,11 @@ struct ReductionLoopExposurePass
         }
       if (!has_reduction) return WalkResult::advance();
 
-      // Walk up to find the immediately enclosing ktdf.stage.
-      Operation* parent = generic->getParentOp();
-      while (parent && !isa<ktdf::StageOp>(parent))
-        parent = parent->getParentOp();
-      if (!parent) return WalkResult::advance();
+      // linalg.generic must always be directly nested inside a ktdf.stage.
+      auto stage = generic->getParentOfType<ktdf::StageOp>();
+      if (!stage) return WalkResult::advance();
 
-      auto stage = cast<ktdf::StageOp>(parent);
-      assert(llvm::find(compute_stages, stage) == compute_stages.end() &&
-             "Expecting at most one linalg.generic per stage");
-      compute_stages.push_back(stage);
+      if (seen.insert(stage).second) compute_stages.push_back(stage);
       return WalkResult::advance();
     });
 
@@ -690,8 +688,21 @@ struct ReductionLoopExposurePass
       // --- 2. Rewrite source_map + source_indices ---
       // The source indices are AffineMap operands, not a flat per-dimension
       // list — constant indices live inside the map as affine constants.
-      // Append one new dim per reduction dim and replace the corresponding
-      // map result.  Result count (= memref rank) is unchanged.
+      //
+      // Two cases for the map result at the reduction dimension d:
+      //
+      //   a) It is an affine constant (e.g. 0) — the pre-chunking shape.
+      //      Append a new dim for the reduction IV and replace the result.
+      //      Combined index: nested.ivs[i]
+      //
+      //   b) It is an AffineDimExpr pointing at an existing operand — meaning
+      //      ReductionDimChunking has already placed a runtime chunk-base value
+      //      (e.g. %arg1 * chunk_size) in that slot.  We must keep that base
+      //      and add the new reduction IV on top of it.
+      //      Replace that existing operand with nested.ivs[i] and fold the
+      //      old base back into the map expression as:
+      //        new_result[d] = old_dim_expr + new_dim_expr
+      //      so the combined index is: chunk_base + nested.ivs[i].
       std::optional<AffineMap> maybe_map = dt.getSourceMap();
       if (!maybe_map) return;
       AffineMap map = *maybe_map;
@@ -701,17 +712,28 @@ struct ReductionLoopExposurePass
                                           map.getResults().end());
       SmallVector<Value> new_indices(dt.getSourceIndices().begin(),
                                      dt.getSourceIndices().end());
+      unsigned extra_dims = 0;
       for (size_t i = 0; i < reduction_dims.size(); ++i) {
         unsigned d = static_cast<unsigned>(reduction_dims[i] + rank_offset);
-        if (d < new_results.size()) {
-          new_results[d] = getAffineDimExpr(base_iv_dim + i, ctx);
+        if (d >= new_results.size()) continue;
+
+        AffineExpr existing = new_results[d];
+        if (auto dim_expr = dyn_cast<AffineDimExpr>(existing)) {
+          // Case (b): existing runtime operand is the chunk-base offset.
+          // Introduce a new dim for nested.ivs[i] and form base + iv.
+          unsigned new_dim = base_iv_dim + extra_dims++;
+          new_results[d] = dim_expr + getAffineDimExpr(new_dim, ctx);
+          new_indices.push_back(nested.ivs[i]);
+        } else {
+          // Case (a): constant or other affine expression — replace outright.
+          unsigned new_dim = base_iv_dim + extra_dims++;
+          new_results[d] = getAffineDimExpr(new_dim, ctx);
           new_indices.push_back(nested.ivs[i]);
         }
       }
 
-      AffineMap new_map = AffineMap::get(
-          base_iv_dim + static_cast<unsigned>(reduction_dims.size()),
-          map.getNumSymbols(), new_results, ctx);
+      AffineMap new_map = AffineMap::get(base_iv_dim + extra_dims,
+                                         map.getNumSymbols(), new_results, ctx);
       dt.setSourceMapAttr(AffineMapAttr::get(new_map));
       dt.getSourceIndicesMutable().assign(new_indices);
     });
