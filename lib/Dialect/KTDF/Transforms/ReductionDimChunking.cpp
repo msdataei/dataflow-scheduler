@@ -26,28 +26,28 @@
 //   stage-0 (MNILU)  : DDR → L1 load
 //   stage-1 (compute): outer scf.for (batch) whose body is a single inner
 //                       ktdf.pipeline with three stages:
-//                         stage-a (L1LU) : L1 → FIFO
-//                         stage-b (SFU)  : linalg.generic reduce
-//                         stage-c (L1SU) : FIFO → L1
+//                         stage-a (L1LU)   : L1 → FIFO
+//                         stage-b (compute): linalg.generic reduce
+//                         stage-c (L1SU)   : FIFO → L1
 //   stage-2 (MNISU)  : L1 → DDR store
 //
 // The transformation replaces the single inner ktdf.pipeline with nested
 // scf.for loops — one per reduction dimension that has more than 1 chunk.
 // Dimensions whose num_chunks==1 produce no loop (the single chunk covers
 // the entire dimension).  Each innermost iteration contains one ktdf.pipeline
-// (Load / SFU / Store stages).  First-vs-rest accumulation behaviour is
-// selected at runtime via %is_first = (all active loop IVs == 0):
+// (Load / Compute / Store stages).  First-vs-rest accumulation behaviour is
+// selected at runtime via %condition = (all active loop IVs == 0):
 //
-//   Load stage : always transfers the input chunk slice to fifo_in.
-//                When !is_first, additionally transfers the partial
-//                accumulator (the existing L1 output buffer) to fifo_out
-//                so the SFU can read it back.
-//   SFU stage  : when is_first, initialises the output tensor with
-//                tensor.empty; otherwise reads the partial result from
-//                fifo_out.  The linalg.generic and write_to_fifo are
-//                unconditional.
-//   Store stage: unconditionally writes fifo_out back to the L1 output
-//                buffer; no is_last distinction is needed.
+//   Load stage   : always transfers the input chunk slice to fifo_in.
+//                  When !condition, additionally transfers the partial
+//                  accumulator (the existing L1 output buffer) to fifo_out
+//                  so the compute stage can read it back.
+//   Compute stage: when condition, initialises the output tensor with
+//                  tensor.empty; otherwise reads the partial result from
+//                  fifo_out.  The linalg.generic and write_to_fifo are
+//                  unconditional.
+//   Store stage  : unconditionally writes fifo_out back to the L1 output
+//                  buffer.
 //
 // The existing L1 output buffer (discovered via the store stage's
 // data_transfer destination) is reused as the partial-accumulation buffer
@@ -56,11 +56,13 @@
 //===----------------------------------------------------------------------===//
 
 #include <memory>
-#include <optional>
 
 #include "dataflow-scheduler/Dialect/KTDF/Analysis/ReductionChunkAnalysis.h"
 #include "dataflow-scheduler/Dialect/KTDF/KTDF.h"
 #include "dataflow-scheduler/Dialect/KTDF/Transforms/Passes.h"
+#include "dataflow-scheduler/Dialect/KTDF/Utils/Utils.h"
+#include "llvm/ADT/DenseSet.h"
+#include "llvm/ADT/STLFunctionalExtras.h"
 #include "llvm/Support/DebugLog.h"
 #include "mlir/Dialect/Arith/IR/Arith.h"
 #include "mlir/Dialect/Func/IR/FuncOps.h"
@@ -109,153 +111,77 @@ static linalg::GenericOp findReductionGenericOp(ktdf::StageOp stage) {
 }
 
 // ---------------------------------------------------------------------------
-// Helper: find the upstream (load) stage of a compute stage — the sibling
-// whose depends_out token appears in compute_stage's depends_in.
+// Result of buildFifoPrivate: named accessors into the PrivateOp results so
+// callers don't need to remember magic result-number offsets.
 // ---------------------------------------------------------------------------
-static ktdf::StageOp findLoadStage(ktdf::PipelineOp pipeline,
-                                   ktdf::StageOp compute_stage) {
-  for (Value tok : compute_stage.getDependsIn()) {
-    for (auto sibling : pipeline.getStages()) {
-      if (sibling == compute_stage) continue;
-      for (Value out_tok : sibling.getDependsOut())
-        if (out_tok == tok) return sibling;
-    }
-  }
-  return {};
-}
+struct FifoPrivateResult {
+  ktdf::PrivateOp priv_op;
+  // Contiguous result slices in yield order: in-slots, partial-slots,
+  // out-slots, tokens.
+  unsigned in_begin;
+  unsigned partial_begin;
+  unsigned out_begin;
+  unsigned tok_begin;
+
+  Value inSlot(unsigned i) { return priv_op.getResult(in_begin + i); }
+  Value partialSlot(unsigned i) { return priv_op.getResult(partial_begin + i); }
+  Value outSlot(unsigned i) { return priv_op.getResult(out_begin + i); }
+  Value token(unsigned i) { return priv_op.getResult(tok_begin + i); }
+};
 
 // ---------------------------------------------------------------------------
-// Helper: find the downstream (store) stage of a compute stage — the sibling
-// whose depends_in token appears in compute_stage's depends_out.
-// ---------------------------------------------------------------------------
-static ktdf::StageOp findStoreStage(ktdf::PipelineOp pipeline,
-                                    ktdf::StageOp compute_stage) {
-  for (Value tok : compute_stage.getDependsOut()) {
-    for (auto sibling : pipeline.getStages()) {
-      if (sibling == compute_stage) continue;
-      for (Value in_tok : sibling.getDependsIn())
-        if (in_tok == tok) return sibling;
-    }
-  }
-  return {};
-}
-
-// ---------------------------------------------------------------------------
-// Helper: locate the input memref fed into the load stage by tracing the
-// linalg.generic input back through read_from_fifo to the data_transfer in
-// the load stage whose destination is that fifo slot.
+// Helper: build a ktdf.private yielding FIFO slots and tokens in the order:
+//   [in_slots..., partial_slots..., out_slots..., tokens...]
 //
-// generic.getInputs()[0]
-//   → defined by ReadFromFifoOp (fifo_in slot)
-//   → DataTransferOp in load_stage with destination == fifo_in slot
-//   → getSource() is the input memref
-//
-// Returns {load_transfer, read_from_fifo}, or {nullptr, nullptr} on failure.
+// Counts determine how many allocations/tokens of each kind to create.
+// All in-slots share `in_slot_type`, all partial-slots share
+// `partial_slot_type`, all out-slots share `out_slot_type`.
+// `partial_slot_type` is only consulted when n_partial_slots > 0.
 // ---------------------------------------------------------------------------
-static std::pair<ktdf::DataTransferOp, ktdf::ReadFromFifoOp> findLoadTransfer(
-    ktdf::StageOp load_stage, linalg::GenericOp generic_op) {
-  auto read_from_fifo =
-      generic_op.getInputs().front().getDefiningOp<ktdf::ReadFromFifoOp>();
-  if (!read_from_fifo) return {nullptr, nullptr};
-
-  Value fifo_in = read_from_fifo.getFifoSlot();
-  ktdf::DataTransferOp load_transfer;
-  load_stage.getBody()->walk([&](ktdf::DataTransferOp dt) {
-    if (dt.isSourceMemRef() && dt.isDestFifo() &&
-        dt.getDestination() == fifo_in) {
-      load_transfer = dt;
-      return WalkResult::interrupt();
-    }
-    return WalkResult::advance();
-  });
-  return {load_transfer, read_from_fifo};
-}
-
-// ---------------------------------------------------------------------------
-// Helper: locate the partial-accumulation memref in the store stage by
-// tracing the linalg.generic result through write_to_fifo to the
-// data_transfer in the store stage whose source is that fifo slot.
-//
-// generic.getResult(0)
-//   → consumed by WriteToFifoOp (fifo_out slot)
-//   → DataTransferOp in store_stage with source == fifo_out slot
-//   → getDestination() is the partial/output memref
-//
-// Returns {store_transfer, write_to_fifo}, or {nullptr, nullptr} on failure.
-// ---------------------------------------------------------------------------
-static std::pair<ktdf::DataTransferOp, ktdf::WriteToFifoOp> findStoreTransfer(
-    ktdf::StageOp compute_stage, ktdf::StageOp store_stage,
-    linalg::GenericOp generic_op) {
-  ktdf::WriteToFifoOp write_to_fifo;
-  compute_stage.getBody()->walk([&](ktdf::WriteToFifoOp write) {
-    if (write.getData() == generic_op.getResult(0)) {
-      write_to_fifo = write;
-      return WalkResult::interrupt();
-    }
-    return WalkResult::advance();
-  });
-  if (!write_to_fifo) return {nullptr, nullptr};
-
-  Value fifo_out = write_to_fifo.getFifoSlot();
-  ktdf::DataTransferOp store_transfer;
-  store_stage.getBody()->walk([&](ktdf::DataTransferOp dt) {
-    if (dt.isSourceFifo() && dt.isDestMemRef() && dt.getSource() == fifo_out) {
-      store_transfer = dt;
-      return WalkResult::interrupt();
-    }
-    return WalkResult::advance();
-  });
-  return {store_transfer, write_to_fifo};
-}
-
-// ---------------------------------------------------------------------------
-// Helper: build a ktdf.private with FIFO slots + two tokens and yield them.
-//
-// Without partial FIFO slot (partial_slot_type == nullopt):
-//   results: [fifo_in(#0), fifo_out(#1), tok0(#2), tok1(#3)]
-//
-// With an optional partial FIFO slot:
-//   results: [fifo_in(#0), fifo_partial(#1), fifo_out(#2), tok0(#3), tok1(#4)]
-//
-// The single-pipeline design only ever passes nullopt here; the partial-
-// slot overload is retained for potential future use.
-// ---------------------------------------------------------------------------
-static ktdf::PrivateOp buildFifoPrivate(
-    OpBuilder& builder, Location loc, ktdf::FifoSlotType in_slot_type,
-    ktdf::FifoSlotType out_slot_type,
-    std::optional<ktdf::FifoSlotType> partial_slot_type) {
+static FifoPrivateResult buildFifoPrivate(
+    OpBuilder& builder, Location loc, unsigned n_in_slots,
+    ktdf::FifoSlotType in_slot_type, unsigned n_partial_slots,
+    ktdf::FifoSlotType partial_slot_type, unsigned n_out_slots,
+    ktdf::FifoSlotType out_slot_type, unsigned n_tokens) {
   auto tok_type = builder.getType<ktdf::TokenType>();
+
   SmallVector<Type> result_types;
-  result_types.push_back(in_slot_type);
-  if (partial_slot_type) result_types.push_back(*partial_slot_type);
-  result_types.push_back(out_slot_type);
-  result_types.push_back(tok_type);
-  result_types.push_back(tok_type);
+  for (unsigned i = 0; i < n_in_slots; ++i)
+    result_types.push_back(in_slot_type);
+  for (unsigned i = 0; i < n_partial_slots; ++i)
+    result_types.push_back(partial_slot_type);
+  for (unsigned i = 0; i < n_out_slots; ++i)
+    result_types.push_back(out_slot_type);
+  for (unsigned i = 0; i < n_tokens; ++i) result_types.push_back(tok_type);
 
   auto priv_op = ktdf::PrivateOp::create(builder, loc, result_types);
   OpBuilder body_bldr(priv_op.getRegion());
-  Location body_loc = loc;
-  auto slot_in = ktdf::FifoAllocateOp::create(
-      body_bldr, body_loc, TypeRange{in_slot_type}, ValueRange{});
-  Value slot_partial_val;
-  if (partial_slot_type) {
-    auto slot_partial = ktdf::FifoAllocateOp::create(
-        body_bldr, body_loc, TypeRange{*partial_slot_type}, ValueRange{});
-    slot_partial_val = slot_partial.getResult(0);
-  }
-  auto slot_out = ktdf::FifoAllocateOp::create(
-      body_bldr, body_loc, TypeRange{out_slot_type}, ValueRange{});
-  auto tok0 = ktdf::CreateTokenOp::create(body_bldr, body_loc, tok_type);
-  auto tok1 = ktdf::CreateTokenOp::create(body_bldr, body_loc, tok_type);
 
   SmallVector<Value> yield_vals;
-  yield_vals.push_back(slot_in.getResult(0));
-  if (slot_partial_val) yield_vals.push_back(slot_partial_val);
-  yield_vals.push_back(slot_out.getResult(0));
-  yield_vals.push_back(tok0.getResult());
-  yield_vals.push_back(tok1.getResult());
-  ktdf::PrivateYieldOp::create(body_bldr, body_loc, yield_vals);
-  return priv_op;
+  auto alloc = [&](ktdf::FifoSlotType t) {
+    return ktdf::FifoAllocateOp::create(body_bldr, loc, TypeRange{t},
+                                        ValueRange{})
+        .getResult(0);
+  };
+  for (unsigned i = 0; i < n_in_slots; ++i)
+    yield_vals.push_back(alloc(in_slot_type));
+  for (unsigned i = 0; i < n_partial_slots; ++i)
+    yield_vals.push_back(alloc(partial_slot_type));
+  for (unsigned i = 0; i < n_out_slots; ++i)
+    yield_vals.push_back(alloc(out_slot_type));
+  for (unsigned i = 0; i < n_tokens; ++i)
+    yield_vals.push_back(
+        ktdf::CreateTokenOp::create(body_bldr, loc, tok_type).getResult());
+
+  ktdf::PrivateYieldOp::create(body_bldr, loc, yield_vals);
+
+  FifoPrivateResult result;
+  result.priv_op = priv_op;
+  result.in_begin = 0;
+  result.partial_begin = n_in_slots;
+  result.out_begin = n_in_slots + n_partial_slots;
+  result.tok_begin = n_in_slots + n_partial_slots + n_out_slots;
+  return result;
 }
 
 // ---------------------------------------------------------------------------
@@ -279,31 +205,29 @@ struct ReductionDimChunkingPass
   // -----------------------------------------------------------------------
   // Top-level transformation entry point.
   // Walk for linalg.generic ops with a reduction iterator; for each one,
-  // find the immediately enclosing ktdf.stage (the SFU stage) and collect
+  // find the immediately enclosing ktdf.stage (the compute stage) and collect
   // unique stages before transforming to avoid mutating the IR while walking.
   // -----------------------------------------------------------------------
   LogicalResult transformModule(ModuleOp module) {
+    // Use a DenseSet to avoid O(n²) duplicate checks.
+    llvm::DenseSet<ktdf::StageOp> seen;
     SmallVector<ktdf::StageOp> compute_stages;
     module.walk([&](linalg::GenericOp generic) {
       // Check if this generic has a reduction iterator.
       bool has_reduction = false;
-      for (auto it : generic.getIteratorTypesArray())
+      for (auto it : generic.getIteratorTypesArray()) {
         if (it == utils::IteratorType::reduction) {
           has_reduction = true;
           break;
         }
+      }
       if (!has_reduction) return WalkResult::advance();
 
-      // Walk up to find the immediately enclosing ktdf.stage.
-      Operation* parent = generic->getParentOp();
-      while (parent && !isa<ktdf::StageOp>(parent))
-        parent = parent->getParentOp();
-      if (!parent) return WalkResult::advance();
+      // linalg.generic must always be directly nested inside a ktdf.stage.
+      auto stage = generic->getParentOfType<ktdf::StageOp>();
+      assert(stage && "linalg.generic not inside a ktdf.stage");
 
-      auto stage = cast<ktdf::StageOp>(parent);
-      // Avoid duplicates (multiple generics in same stage).
-      if (llvm::find(compute_stages, stage) == compute_stages.end())
-        compute_stages.push_back(stage);
+      if (seen.insert(stage).second) compute_stages.push_back(stage);
       return WalkResult::advance();
     });
 
@@ -314,19 +238,12 @@ struct ReductionDimChunkingPass
   }
 
   // -----------------------------------------------------------------------
-  // Transform the outer pipeline given the SFU stage (the ktdf.stage that
-  // directly contains the reduction linalg.generic).
+  // Transform the inner pipeline given the compute stage (the ktdf.stage
+  // that directly contains the reduction linalg.generic).
   // -----------------------------------------------------------------------
   LogicalResult transformPipeline(ktdf::StageOp compute_stage) {
-    // Navigate up: SFU stage → inner pipeline.
-    auto inner_pipeline =
-        dyn_cast<ktdf::PipelineOp>(compute_stage->getParentOp());
-    if (!inner_pipeline) {
-      LDBG(1) << PASS_NAME
-          ": SFU stage not directly inside a pipeline — "
-          "skipping";
-      return success();
-    }
+    // Stages are always direct children of a pipeline.
+    auto inner_pipeline = cast<ktdf::PipelineOp>(compute_stage->getParentOp());
 
     // Verify there is exactly one inner pipeline inside the parent region.
     unsigned inner_pipeline_count = 0;
@@ -335,36 +252,19 @@ struct ReductionDimChunkingPass
           ++inner_pipeline_count;
           return WalkResult::skip();
         });
-    if (inner_pipeline_count != 1) {
-      LDBG(1) << PASS_NAME ": expected exactly 1 inner pipeline, got "
-              << inner_pipeline_count << " — skipping";
-      return success();
-    }
+    assert(inner_pipeline_count == 1 &&
+           "expected exactly 1 inner pipeline in parent region");
 
     ktdf::StageOp load_stage = findLoadStage(inner_pipeline, compute_stage);
-    if (!load_stage) {
-      LDBG(1) << PASS_NAME
-          ": could not find load stage upstream of compute "
-          "stage — skipping";
-      return success();
-    }
+    assert(load_stage && "could not find load stage upstream of compute stage");
 
     ktdf::StageOp store_stage = findStoreStage(inner_pipeline, compute_stage);
-    if (!store_stage) {
-      LDBG(1) << PASS_NAME
-          ": could not find store stage downstream of compute "
-          "stage — skipping";
-      return success();
-    }
+    assert(store_stage &&
+           "could not find store stage downstream of compute stage");
 
     // Locate the linalg.generic with a reduction iterator.
     linalg::GenericOp generic_op = findReductionGenericOp(compute_stage);
-    if (!generic_op) {
-      LDBG(1) << PASS_NAME
-          ": no reduction linalg.generic in SFU stage — "
-          "skipping";
-      return success();
-    }
+    assert(generic_op && "no reduction linalg.generic in compute stage");
 
     // ------------------------------------------------------------------
     // Determine reduction dims, num_chunks, and per-dim chunk sizes.
@@ -381,10 +281,10 @@ struct ReductionDimChunkingPass
       // Auto-infer via analysis.
       auto result = analyzeReductionChunks(generic_op, chunkSizeThreshold);
       if (!result) {
-        LDBG(1) << PASS_NAME
-                << ": ReductionChunkAnalysis could not infer chunk count — "
-                   "skipping";
-        return success();
+        inner_pipeline.emitError(PASS_NAME
+                                 ": ReductionChunkAnalysis could not infer "
+                                 "chunk count");
+        return failure();
       }
       loop_num_chunks = result->num_chunks;
       chunk_sizes = std::move(result->chunk_sizes);
@@ -397,15 +297,17 @@ struct ReductionDimChunkingPass
           reduction_dims.push_back(i);
 
       if (reduction_dims.empty()) {
-        LDBG(1) << PASS_NAME ": could not find reduction dimension — skipping";
-        return success();
+        inner_pipeline.emitError(PASS_NAME
+                                 ": could not find reduction dimension");
+        return failure();
       }
 
       if (numChunks.size() != reduction_dims.size()) {
-        LDBG(1) << PASS_NAME ": numChunks has " << numChunks.size()
-                << " entries but there are " << reduction_dims.size()
-                << " reduction dims — skipping";
-        return success();
+        inner_pipeline.emitError(
+            llvm::Twine(PASS_NAME ": numChunks has ") +
+            llvm::Twine(numChunks.size()) + " entries but there are " +
+            llvm::Twine(reduction_dims.size()) + " reduction dims");
+        return failure();
       }
 
       // We only need loop_num_chunks for the debug log; actual loops are
@@ -466,16 +368,16 @@ struct ReductionDimChunkingPass
   //
   // For N active (chunked) dims the structure is:
   //
-  //   scf.for %iv_0 = 0 to num_chunks[0] {     // only if num_chunks[0] > 1
-  //     scf.for %iv_1 = 0 to num_chunks[1] {   // only if num_chunks[1] > 1
+  //   scf.for %iv_0 = 0 to num_chunks[0] {       // only if num_chunks[0] > 1
+  //     scf.for %iv_1 = 0 to num_chunks[1] {     // only if num_chunks[1] > 1
   //       ...
-  //         %is_first = (iv_0 == 0 && iv_1 == 0 && ...)
-  //         ktdf.pipeline { Load / SFU / Store }
+  //         %condition = (iv_0 == 0 && iv_1 == 0 && ...)
+  //         ktdf.pipeline { Load / Compute / Store }
   //     }
   //   }
   //
   // For dims whose num_chunks == 1, the IV is treated as the constant 0 when
-  // computing offsets and is_first.
+  // computing offsets and condition.
   // -----------------------------------------------------------------------
   LogicalResult rewriteComputeStage(
       ktdf::PipelineOp inner_pipeline, ktdf::StageOp load_stage,
@@ -490,9 +392,10 @@ struct ReductionDimChunkingPass
     // Step 1: Trace dataflow from linalg.generic ins/outs to find the
     // load/store data_transfer ops and the FIFO slot ops they connect to.
     //
-    //   generic ins[0] ← ReadFromFifoOp(fifo_in) ←
-    //   DataTransferOp(src=input_memref) generic result →
-    //   WriteToFifoOp(fifo_out)  → DataTransferOp(dst=partial_memref)
+    //   generic.ins[0]    ← ReadFromFifoOp(fifo_in)
+    //                     ← DataTransferOp(src=input_memref, dst=fifo_in)
+    //   generic.result(0) → WriteToFifoOp(fifo_out)
+    //                     → DataTransferOp(src=fifo_out, dst=partial_memref)
     // ------------------------------------------------------------------
     auto [load_transfer, read_from_fifo] =
         findLoadTransfer(load_stage, generic_op);
@@ -553,10 +456,10 @@ struct ReductionDimChunkingPass
         cast<RankedTensorType>(generic_op.getOutputs().front().getType());
 
     // ------------------------------------------------------------------
-    // Step 3: Build the replacement: nested scf.for loops (one per reduction
+    // Step 2: Build the replacement: nested scf.for loops (one per reduction
     // dim with num_chunks > 1) containing one ktdf.pipeline per innermost
-    // iteration.  First-vs-rest behaviour is selected at runtime with scf.if
-    // guards.
+    // iteration.  First-vs-rest behaviour is selected at runtime via scf.if
+    // guards on %condition.
     //
     // We insert the outermost loop BEFORE inner_pipeline, then erase it.
     // ------------------------------------------------------------------
@@ -570,12 +473,13 @@ struct ReductionDimChunkingPass
 
     // Applicable-units attributes from original stages.
     auto load_units = load_stage.getApplicableUnitsAttr();
-    auto sfu_units = compute_stage.getApplicableUnitsAttr();
+    auto compute_units = compute_stage.getApplicableUnitsAttr();
     auto store_units = store_stage.getApplicableUnitsAttr();
 
     // Batch-loop induction variable.
-    scf::ForOp batch_for =
-        dyn_cast<scf::ForOp>(inner_pipeline->getParentRegion()->getParentOp());
+    auto batch_for =
+        cast<scf::ForOp>(inner_pipeline->getParentRegion()->getParentOp());
+    assert(batch_for && "inner pipeline not nested inside a batch scf.for");
 
     // Shared c0 / c1 constants emitted just before the outermost chunk loop.
     Value c0 = arith::ConstantIndexOp::create(rewriter, loc, 0);
@@ -593,9 +497,9 @@ struct ReductionDimChunkingPass
       c_per_dim_num_chunks.push_back(
           arith::ConstantIndexOp::create(rewriter, loc, nc));
 
-    // Emit L1-slot index: divsi(subi(batch_iv, c0), c1).
-    // Uses c0/c1 defined above.
-    Value batch_iv = batch_for ? batch_for.getInductionVar() : Value{};
+    // L1-slot index is the batch induction variable itself; c0/c1 are used
+    // when building the index arithmetic inside each stage body.
+    Value batch_iv = batch_for.getInductionVar();
     auto emit_l1_idx = [&](OpBuilder& builder, Location l,
                            Value batch_iv_val) -> Value {
       Value sub = arith::SubIOp::create(builder, l, batch_iv_val, c0);
@@ -606,7 +510,7 @@ struct ReductionDimChunkingPass
     // Build nested scf.for loops.  For each reduction dim j:
     //   - if per_dim_num_chunks[j] == 1: no loop; iv[j] = c0 (constant 0).
     //   - else: emit scf.for %iv_j = 0 to per_dim_num_chunks[j] step 1.
-    // Track active IVs for is_first computation and the OpBuilder to use
+    // Track active IVs for condition computation and the OpBuilder to use
     // when emitting the pipeline (starts at the innermost loop body or at
     // the current insertion point if no loops were generated).
     // ------------------------------------------------------------------
@@ -640,25 +544,24 @@ struct ReductionDimChunkingPass
     // Now emit the pipeline body using `inner_builder` (innermost context).
     // ------------------------------------------------------------------
 
-    // %is_first = AND of (iv_j == 0) for all dims.
+    // condition = AND of (iv_j == 0) for all dims with num_chunks > 1.
     // Dims with num_chunks==1 have iv==c0, so their cmpi is trivially true
-    // but we omit them to avoid dead constants.  For dims with a real loop
-    // IV we emit the compare and AND them together.
-    Value is_first;
+    // but we omit them to avoid dead constants.
+    Value condition;
     for (size_t j = 0; j < n_dims; ++j) {
       if (per_dim_num_chunks[j] == 1) continue;  // iv is always 0
       Value eq = arith::CmpIOp::create(
           inner_builder, loc, arith::CmpIPredicate::eq, dim_ivs[j], c0);
-      is_first = is_first
-                     ? arith::AndIOp::create(inner_builder, loc, is_first, eq)
-                     : eq;
+      condition = condition
+                      ? arith::AndIOp::create(inner_builder, loc, condition, eq)
+                      : eq;
     }
     // If every dim had num_chunks==1 (degenerate: pass shouldn't have been
-    // called, but handle gracefully), is_first remains null — use c0 != c0
-    // equivalent: always true.
-    if (!is_first) {
-      is_first = arith::CmpIOp::create(inner_builder, loc,
-                                       arith::CmpIPredicate::eq, c0, c0);
+    // called, but handle gracefully), condition remains null — emit
+    // arith.constant true directly rather than a redundant cmpi.
+    if (!condition) {
+      condition = arith::ConstantIntOp::create(inner_builder, loc, /*value=*/1,
+                                               /*width=*/1);
     }
 
     // ---- Single pipeline per innermost chunk iteration ----
@@ -666,162 +569,226 @@ struct ReductionDimChunkingPass
     OpBuilder pipe_bldr(phase_pipeline.getBody(),
                         phase_pipeline.getBody()->end());
 
-    // Private: fifo_in, fifo_out, tok0, tok1.
-    auto slots = buildFifoPrivate(pipe_bldr, loc, chunk_in_fifo_type,
-                                  out_fifo_type, std::nullopt);
-    Value fifo_in = slots.getResult(0);
-    Value fifo_out = slots.getResult(1);
-    Value tok0 = slots.getResult(2);
-    Value tok1 = slots.getResult(3);
+    // Private: 1 in-slot, 0 partial-slots, 1 out-slot, 2 tokens.
+    auto slots = buildFifoPrivate(pipe_bldr, loc,
+                                  /*n_in_slots=*/1, chunk_in_fifo_type,
+                                  /*n_partial_slots=*/0, out_fifo_type,
+                                  /*n_out_slots=*/1, out_fifo_type,
+                                  /*n_tokens=*/2);
+    Value fifo_in = slots.inSlot(0);
+    Value fifo_out = slots.outSlot(0);
+    Value tok0 = slots.token(0);
+    Value tok1 = slots.token(1);
 
-    // -------- Load stage --------
-    auto load_new = ktdf::StageOp::create(pipe_bldr, loc,
-                                          /*depends_in=*/ValueRange{},
-                                          /*depends_out=*/ValueRange{tok0});
-    if (load_units) load_new.setApplicableUnitsAttr(load_units);
-    {
-      OpBuilder stage_bldr(load_new.getBody(), load_new.getBody()->end());
-      Value l1_idx = emit_l1_idx(stage_bldr, loc, batch_iv);
+    buildLoadStage(pipe_bldr, loc, tok0, load_units, condition, batch_iv,
+                   input_memref, input_memref_type, partial_memref,
+                   output_memref_type, out_fifo_type, fifo_in, fifo_out,
+                   chunk_fifo_elements, reduction_dims, chunk_sizes, n_dims,
+                   dim_ivs, c_chunk_sizes, c0, emit_l1_idx);
 
-      // Per-reduction-dim row offsets: iv_j * chunk_size[j].
-      SmallVector<Value> row_offsets;
-      for (size_t j = 0; j < n_dims; ++j) {
-        row_offsets.push_back(arith::MulIOp::create(stage_bldr, loc, dim_ivs[j],
-                                                    c_chunk_sizes[j]));
-      }
+    buildComputeStage(pipe_bldr, loc, tok0, tok1, compute_units, condition,
+                      fifo_in, fifo_out, chunk_input_tensor_type,
+                      output_tensor_type, generic_op);
 
-      // Source indices for the input data transfer.
-      int64_t input_rank = input_memref_type.getRank();
-      SmallVector<Value> src_indices;
-      src_indices.reserve(static_cast<size_t>(input_rank));
-      src_indices.push_back(l1_idx);
-      for (int64_t i = 1; i < input_rank; ++i) {
-        int64_t generic_dim = i - 1;
-        auto it = llvm::find(reduction_dims, generic_dim);
-        if (it != reduction_dims.end())
-          src_indices.push_back(row_offsets[it - reduction_dims.begin()]);
-        else
-          src_indices.push_back(c0);
-      }
-
-      SmallVector<int64_t> src_static_sizes;
-      src_static_sizes.push_back(1);
-      for (int64_t i = 1; i < input_rank; ++i) {
-        int64_t generic_dim = i - 1;
-        auto it = llvm::find(reduction_dims, generic_dim);
-        src_static_sizes.push_back(
-            it != reduction_dims.end()
-                ? chunk_sizes[it - reduction_dims.begin()]
-                : input_memref_type.getDimSize(i));
-      }
-
-      AffineMap input_id = AffineMap::getMultiDimIdentityMap(
-          input_rank, stage_bldr.getContext());
-      ktdf::DataTransferOp::create(stage_bldr, loc, input_memref, input_id,
-                                   src_indices, src_static_sizes, fifo_in,
-                                   AffineMap{}, ValueRange{},
-                                   ArrayRef<int64_t>{chunk_fifo_elements});
-
-      // scf.if %is_first {} else { load partial buffer into fifo_out }
-      auto if_op =
-          scf::IfOp::create(stage_bldr, loc, /*resultTypes=*/TypeRange{},
-                            is_first, /*withElseRegion=*/true);
-      {
-        OpBuilder else_bldr =
-            OpBuilder::atBlockBegin(&if_op.getElseRegion().front());
-        int64_t partial_rank = output_memref_type.getRank();
-        AffineMap partial_id = AffineMap::getMultiDimIdentityMap(
-            partial_rank, else_bldr.getContext());
-        SmallVector<Value> partial_src_indices;
-        partial_src_indices.push_back(l1_idx);
-        for (int64_t i = 1; i < partial_rank; ++i)
-          partial_src_indices.push_back(c0);
-        SmallVector<int64_t> partial_src_sizes;
-        partial_src_sizes.push_back(1);
-        for (int64_t i = 1; i < partial_rank; ++i)
-          partial_src_sizes.push_back(output_memref_type.getDimSize(i));
-        ktdf::DataTransferOp::create(
-            else_bldr, loc, partial_memref, partial_id, partial_src_indices,
-            partial_src_sizes, fifo_out, AffineMap{}, ValueRange{},
-            ArrayRef<int64_t>{
-                static_cast<int64_t>(out_fifo_type.getNumElements())});
-      }
-    }
-
-    // -------- SFU stage --------
-    auto sfu_new = ktdf::StageOp::create(pipe_bldr, loc,
-                                         /*depends_in=*/ValueRange{tok0},
-                                         /*depends_out=*/ValueRange{tok1});
-    if (sfu_units) sfu_new.setApplicableUnitsAttr(sfu_units);
-    {
-      OpBuilder stage_bldr(sfu_new.getBody(), sfu_new.getBody()->end());
-
-      auto in_tensor = ktdf::ReadFromFifoOp::create(
-          stage_bldr, loc, chunk_input_tensor_type, fifo_in);
-
-      auto if_outs = scf::IfOp::create(stage_bldr, loc,
-                                       TypeRange{output_tensor_type}, is_first,
-                                       /*withElseRegion=*/true);
-      {
-        OpBuilder then_bldr =
-            OpBuilder::atBlockBegin(&if_outs.getThenRegion().front());
-        Value empty_tensor = tensor::EmptyOp::create(
-            then_bldr, loc, output_tensor_type.getShape(),
-            output_tensor_type.getElementType());
-        scf::YieldOp::create(then_bldr, loc, empty_tensor);
-      }
-      {
-        OpBuilder else_bldr =
-            OpBuilder::atBlockBegin(&if_outs.getElseRegion().front());
-        Value partial_tensor = ktdf::ReadFromFifoOp::create(
-            else_bldr, loc, output_tensor_type, fifo_out);
-        scf::YieldOp::create(else_bldr, loc, partial_tensor);
-      }
-      Value outs_val = if_outs.getResult(0);
-
-      IRMapping mapping;
-      mapping.map(generic_op.getInputs().front(), in_tensor.getResult());
-      mapping.map(generic_op.getOutputs().front(), outs_val);
-      auto new_generic = cast<linalg::GenericOp>(
-          stage_bldr.clone(*generic_op.getOperation(), mapping));
-
-      ktdf::WriteToFifoOp::create(stage_bldr, loc, new_generic.getResult(0),
-                                  fifo_out);
-    }
-
-    // -------- Store stage --------
-    auto store_new = ktdf::StageOp::create(pipe_bldr, loc,
-                                           /*depends_in=*/ValueRange{tok1},
-                                           /*depends_out=*/ValueRange{});
-    if (store_units) store_new.setApplicableUnitsAttr(store_units);
-    {
-      OpBuilder stage_bldr(store_new.getBody(), store_new.getBody()->end());
-      Value l1_idx = emit_l1_idx(stage_bldr, loc, batch_iv);
-
-      auto dest_memref_type = cast<MemRefType>(partial_memref.getType());
-      int64_t dest_rank = dest_memref_type.getRank();
-      AffineMap dest_id =
-          AffineMap::getMultiDimIdentityMap(dest_rank, stage_bldr.getContext());
-      SmallVector<Value> dest_indices;
-      dest_indices.push_back(l1_idx);
-      for (int64_t i = 1; i < dest_rank; ++i) dest_indices.push_back(c0);
-      SmallVector<int64_t> dest_sizes;
-      dest_sizes.push_back(1);
-      for (int64_t i = 1; i < dest_rank; ++i)
-        dest_sizes.push_back(dest_memref_type.getDimSize(i));
-      ktdf::DataTransferOp::create(
-          stage_bldr, loc, fifo_out, AffineMap{}, ValueRange{},
-          ArrayRef<int64_t>{
-              static_cast<int64_t>(out_fifo_type.getNumElements())},
-          partial_memref, dest_id, dest_indices, dest_sizes);
-    }
+    buildStoreStage(pipe_bldr, loc, tok1, store_units, batch_iv, partial_memref,
+                    out_fifo_type, fifo_out, c0, emit_l1_idx);
 
     // ------------------------------------------------------------------
-    // Step 4: Erase the original inner pipeline.
+    // Step 3: Erase the original inner pipeline.
     // ------------------------------------------------------------------
     rewriter.eraseOp(inner_pipeline);
 
     return success();
+  }
+
+  // -----------------------------------------------------------------------
+  // Helper: build the load stage inside a chunk pipeline.
+  //
+  // The load stage always transfers one input chunk slice (memref → fifo_in).
+  // On non-first iterations (!condition) it also feeds the existing partial
+  // accumulator (partial_memref → fifo_out) so the compute stage can read it.
+  //
+  // Input memref layout: dim-0 is the batch/L1 slot index; dims 1..rank-1
+  // map to linalg.generic iterator dims 0..rank-2.  For each memref dim i
+  // (i ≥ 1), the corresponding generic dim is (i-1).  If that generic dim is
+  // a reduction dim, the source offset is iv_j * chunk_size[j] and the static
+  // size is chunk_size[j]; otherwise offset is 0 and size is the full dim.
+  // -----------------------------------------------------------------------
+  void buildLoadStage(
+      OpBuilder& pipe_bldr, Location loc, Value tok0, ArrayAttr load_units,
+      Value condition, Value batch_iv, Value input_memref,
+      MemRefType input_memref_type, Value partial_memref,
+      MemRefType output_memref_type, ktdf::FifoSlotType out_fifo_type,
+      Value fifo_in, Value fifo_out, int64_t chunk_fifo_elements,
+      ArrayRef<int64_t> reduction_dims, ArrayRef<int64_t> chunk_sizes,
+      size_t n_dims, ArrayRef<Value> dim_ivs, ArrayRef<Value> c_chunk_sizes,
+      Value c0,
+      llvm::function_ref<Value(OpBuilder&, Location, Value)> emit_l1_idx) {
+    auto stage = ktdf::StageOp::create(pipe_bldr, loc,
+                                       /*depends_in=*/ValueRange{},
+                                       /*depends_out=*/ValueRange{tok0});
+    if (load_units) stage.setApplicableUnitsAttr(load_units);
+
+    OpBuilder b(stage.getBody(), stage.getBody()->end());
+    Value l1_idx = emit_l1_idx(b, loc, batch_iv);
+
+    // Per-reduction-dim row offsets: iv_j * chunk_size[j].
+    SmallVector<Value> row_offsets;
+    row_offsets.reserve(n_dims);
+    for (size_t j = 0; j < n_dims; ++j)
+      row_offsets.push_back(
+          arith::MulIOp::create(b, loc, dim_ivs[j], c_chunk_sizes[j]));
+
+    // Build source indices and static sizes together.
+    // dim-0 of the memref is the batch/L1 slot (index = l1_idx, size = 1).
+    // dims 1..rank-1 map to generic dims 0..rank-2:
+    //   - reduction dim → offset = row_offset[j], size = chunk_size[j]
+    //   - parallel dim  → offset = 0,             size = full dim size
+    int64_t input_rank = input_memref_type.getRank();
+    SmallVector<Value> src_indices;
+    SmallVector<int64_t> src_static_sizes;
+    src_indices.reserve(static_cast<size_t>(input_rank));
+    src_static_sizes.reserve(static_cast<size_t>(input_rank));
+    src_indices.push_back(l1_idx);
+    src_static_sizes.push_back(1);
+    for (int64_t i = 1; i < input_rank; ++i) {
+      int64_t generic_dim = i - 1;
+      auto it = llvm::find(reduction_dims, generic_dim);
+      if (it != reduction_dims.end()) {
+        size_t j = static_cast<size_t>(it - reduction_dims.begin());
+        src_indices.push_back(row_offsets[j]);
+        src_static_sizes.push_back(chunk_sizes[j]);
+      } else {
+        src_indices.push_back(c0);
+        src_static_sizes.push_back(input_memref_type.getDimSize(i));
+      }
+    }
+
+    AffineMap input_id =
+        AffineMap::getMultiDimIdentityMap(input_rank, b.getContext());
+    ktdf::DataTransferOp::create(
+        b, loc, input_memref, input_id, src_indices, src_static_sizes, fifo_in,
+        AffineMap{}, ValueRange{}, ArrayRef<int64_t>{chunk_fifo_elements});
+
+    // On non-first iterations, feed the partial accumulator into fifo_out so
+    // the compute stage can read it back as the running result.
+    auto if_op =
+        scf::IfOp::create(b, loc, /*resultTypes=*/TypeRange{}, condition,
+                          /*withElseRegion=*/true);
+    {
+      OpBuilder else_bldr =
+          OpBuilder::atBlockBegin(&if_op.getElseRegion().front());
+      int64_t partial_rank = output_memref_type.getRank();
+      AffineMap partial_id = AffineMap::getMultiDimIdentityMap(
+          partial_rank, else_bldr.getContext());
+      SmallVector<Value> partial_src_indices;
+      SmallVector<int64_t> partial_src_sizes;
+      partial_src_indices.reserve(static_cast<size_t>(partial_rank));
+      partial_src_sizes.reserve(static_cast<size_t>(partial_rank));
+      partial_src_indices.push_back(l1_idx);
+      partial_src_sizes.push_back(1);
+      for (int64_t i = 1; i < partial_rank; ++i) {
+        partial_src_indices.push_back(c0);
+        partial_src_sizes.push_back(output_memref_type.getDimSize(i));
+      }
+      ktdf::DataTransferOp::create(
+          else_bldr, loc, partial_memref, partial_id, partial_src_indices,
+          partial_src_sizes, fifo_out, AffineMap{}, ValueRange{},
+          ArrayRef<int64_t>{
+              static_cast<int64_t>(out_fifo_type.getNumElements())});
+    }
+  }
+
+  // -----------------------------------------------------------------------
+  // Helper: build the compute stage inside a chunk pipeline.
+  //
+  // On the first iteration (condition == true) the output is initialised with
+  // tensor.empty.  On subsequent iterations the partial result is read from
+  // fifo_out.  The cloned linalg.generic and the write_to_fifo are
+  // unconditional.
+  // -----------------------------------------------------------------------
+  void buildComputeStage(OpBuilder& pipe_bldr, Location loc, Value tok0,
+                         Value tok1, ArrayAttr compute_units, Value condition,
+                         Value fifo_in, Value fifo_out,
+                         RankedTensorType chunk_input_tensor_type,
+                         RankedTensorType output_tensor_type,
+                         linalg::GenericOp generic_op) {
+    auto stage = ktdf::StageOp::create(pipe_bldr, loc,
+                                       /*depends_in=*/ValueRange{tok0},
+                                       /*depends_out=*/ValueRange{tok1});
+    if (compute_units) stage.setApplicableUnitsAttr(compute_units);
+
+    OpBuilder b(stage.getBody(), stage.getBody()->end());
+
+    auto in_tensor =
+        ktdf::ReadFromFifoOp::create(b, loc, chunk_input_tensor_type, fifo_in);
+
+    // Select the output tensor: tensor.empty on first iteration, or the
+    // partial result read from fifo_out on subsequent iterations.
+    auto if_op = scf::IfOp::create(b, loc, TypeRange{output_tensor_type},
+                                   condition, /*withElseRegion=*/true);
+    {
+      OpBuilder then_bldr =
+          OpBuilder::atBlockBegin(&if_op.getThenRegion().front());
+      Value empty_tensor =
+          tensor::EmptyOp::create(then_bldr, loc, output_tensor_type.getShape(),
+                                  output_tensor_type.getElementType());
+      scf::YieldOp::create(then_bldr, loc, empty_tensor);
+    }
+    {
+      OpBuilder else_bldr =
+          OpBuilder::atBlockBegin(&if_op.getElseRegion().front());
+      Value partial_tensor = ktdf::ReadFromFifoOp::create(
+          else_bldr, loc, output_tensor_type, fifo_out);
+      scf::YieldOp::create(else_bldr, loc, partial_tensor);
+    }
+
+    IRMapping mapping;
+    mapping.map(generic_op.getInputs().front(), in_tensor.getResult());
+    mapping.map(generic_op.getOutputs().front(), if_op.getResult(0));
+    auto new_generic =
+        cast<linalg::GenericOp>(b.clone(*generic_op.getOperation(), mapping));
+
+    ktdf::WriteToFifoOp::create(b, loc, new_generic.getResult(0), fifo_out);
+  }
+
+  // -----------------------------------------------------------------------
+  // Helper: build the store stage inside a chunk pipeline.
+  //
+  // Unconditionally reads the result from fifo_out and writes it back to the
+  // L1 partial-accumulation buffer.
+  // -----------------------------------------------------------------------
+  void buildStoreStage(
+      OpBuilder& pipe_bldr, Location loc, Value tok1, ArrayAttr store_units,
+      Value batch_iv, Value partial_memref, ktdf::FifoSlotType out_fifo_type,
+      Value fifo_out, Value c0,
+      llvm::function_ref<Value(OpBuilder&, Location, Value)> emit_l1_idx) {
+    auto stage = ktdf::StageOp::create(pipe_bldr, loc,
+                                       /*depends_in=*/ValueRange{tok1},
+                                       /*depends_out=*/ValueRange{});
+    if (store_units) stage.setApplicableUnitsAttr(store_units);
+
+    OpBuilder b(stage.getBody(), stage.getBody()->end());
+    Value l1_idx = emit_l1_idx(b, loc, batch_iv);
+
+    auto dest_memref_type = cast<MemRefType>(partial_memref.getType());
+    int64_t dest_rank = dest_memref_type.getRank();
+    AffineMap dest_id =
+        AffineMap::getMultiDimIdentityMap(dest_rank, b.getContext());
+    SmallVector<Value> dest_indices;
+    SmallVector<int64_t> dest_sizes;
+    dest_indices.reserve(static_cast<size_t>(dest_rank));
+    dest_sizes.reserve(static_cast<size_t>(dest_rank));
+    dest_indices.push_back(l1_idx);
+    dest_sizes.push_back(1);
+    for (int64_t i = 1; i < dest_rank; ++i) {
+      dest_indices.push_back(c0);
+      dest_sizes.push_back(dest_memref_type.getDimSize(i));
+    }
+    ktdf::DataTransferOp::create(
+        b, loc, fifo_out, AffineMap{}, ValueRange{},
+        ArrayRef<int64_t>{static_cast<int64_t>(out_fifo_type.getNumElements())},
+        partial_memref, dest_id, dest_indices, dest_sizes);
   }
 };
 

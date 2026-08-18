@@ -56,6 +56,7 @@
 
 #include "dataflow-scheduler/Dialect/KTDF/KTDF.h"
 #include "dataflow-scheduler/Dialect/KTDF/Transforms/Passes.h"
+#include "dataflow-scheduler/Dialect/KTDF/Utils/Utils.h"
 #include "llvm/Support/DebugLog.h"
 #include "mlir/Dialect/Arith/IR/Arith.h"
 #include "mlir/Dialect/Linalg/IR/Linalg.h"
@@ -101,15 +102,6 @@ linalg::GenericOp findReductionGenericOp(ktdf::StageOp stage) {
     return WalkResult::advance();
   });
   return found;
-}
-
-// ---------------------------------------------------------------------------
-// Return true if `token` appears in the depends_in list of `stage`.
-// ---------------------------------------------------------------------------
-bool stageConsumesToken(ktdf::StageOp stage, Value token) {
-  for (Value dep : stage.getDependsIn())
-    if (dep == token) return true;
-  return false;
 }
 
 // ---------------------------------------------------------------------------
@@ -470,20 +462,8 @@ struct ReductionLoopExposurePass
       return failure();
     }
 
-    ktdf::StageOp load_stage;
-    for (Value tok : compute_stage.getDependsIn()) {
-      for (auto sibling : inner_pipeline.getStages()) {
-        if (sibling == compute_stage) continue;
-        for (Value out_tok : sibling.getDependsOut()) {
-          if (out_tok == tok) {
-            load_stage = sibling;
-            break;
-          }
-        }
-        if (load_stage) break;
-      }
-      if (load_stage) break;
-    }
+    ktdf::StageOp load_stage =
+        ktdf::findLoadStage(inner_pipeline, compute_stage);
     if (!load_stage) {
       inner_pipeline.emitError(
           PASS_NAME ": cannot find load stage upstream of compute stage");
@@ -608,17 +588,8 @@ struct ReductionLoopExposurePass
     // -----------------------------------------------------------------------
     // 3. Find the "conditional store" stage.
     // -----------------------------------------------------------------------
-    ktdf::StageOp conditional_store_stage;
-    for (Value tok : compute_stage.getDependsOut()) {
-      for (auto sibling : inner_pipeline.getStages()) {
-        if (sibling == compute_stage) continue;
-        if (stageConsumesToken(sibling, tok)) {
-          conditional_store_stage = sibling;
-          break;
-        }
-      }
-      if (conditional_store_stage) break;
-    }
+    ktdf::StageOp conditional_store_stage =
+        ktdf::findStoreStage(inner_pipeline, compute_stage);
 
     // -----------------------------------------------------------------------
     // 4. Rewrite every stage.

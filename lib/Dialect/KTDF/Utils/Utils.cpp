@@ -26,11 +26,12 @@
 #include <llvm/Support/Debug.h>
 #include <mlir/Support/LLVM.h>
 
-#include <optional>
+#include <utility>
 
 #include "dataflow-scheduler/Dialect/Dataflow/Dataflow.h"
 #include "dataflow-scheduler/Dialect/Uniform/Uniform.h"
 #include "ktir/Dialect/KTDP/KTDPAttrs.h"
+#include "mlir/Dialect/Linalg/IR/Linalg.h"
 
 #define DEBUG_TYPE "ktdf-utilities"
 
@@ -84,4 +85,74 @@ auto mlir::ktdf::findStageForUnit(uniform::QueryMapOp query_op,
   }
 
   return {};
+}
+
+auto mlir::ktdf::findLoadStage(ktdf::PipelineOp pipeline,
+                               ktdf::StageOp compute_stage) -> StageOp {
+  for (Value tok : compute_stage.getDependsIn()) {
+    for (auto sibling : pipeline.getStages()) {
+      if (sibling == compute_stage) continue;
+      for (Value out_tok : sibling.getDependsOut())
+        if (out_tok == tok) return sibling;
+    }
+  }
+  return {};
+}
+
+auto mlir::ktdf::findStoreStage(ktdf::PipelineOp pipeline,
+                                ktdf::StageOp compute_stage) -> StageOp {
+  for (Value tok : compute_stage.getDependsOut()) {
+    for (auto sibling : pipeline.getStages()) {
+      if (sibling == compute_stage) continue;
+      for (Value in_tok : sibling.getDependsIn())
+        if (in_tok == tok) return sibling;
+    }
+  }
+  return {};
+}
+
+auto mlir::ktdf::findLoadTransfer(ktdf::StageOp load_stage,
+                                  linalg::GenericOp generic_op)
+    -> std::pair<ktdf::DataTransferOp, ktdf::ReadFromFifoOp> {
+  auto read_from_fifo =
+      generic_op.getInputs().front().getDefiningOp<ktdf::ReadFromFifoOp>();
+  if (!read_from_fifo) return {nullptr, nullptr};
+
+  Value fifo_in = read_from_fifo.getFifoSlot();
+  ktdf::DataTransferOp load_transfer;
+  load_stage.getBody()->walk([&](ktdf::DataTransferOp dt) {
+    if (dt.isSourceMemRef() && dt.isDestFifo() &&
+        dt.getDestination() == fifo_in) {
+      load_transfer = dt;
+      return WalkResult::interrupt();
+    }
+    return WalkResult::advance();
+  });
+  return {load_transfer, read_from_fifo};
+}
+
+auto mlir::ktdf::findStoreTransfer(ktdf::StageOp compute_stage,
+                                   ktdf::StageOp store_stage,
+                                   linalg::GenericOp generic_op)
+    -> std::pair<ktdf::DataTransferOp, ktdf::WriteToFifoOp> {
+  ktdf::WriteToFifoOp write_to_fifo;
+  compute_stage.getBody()->walk([&](ktdf::WriteToFifoOp write) {
+    if (write.getData() == generic_op.getResult(0)) {
+      write_to_fifo = write;
+      return WalkResult::interrupt();
+    }
+    return WalkResult::advance();
+  });
+  if (!write_to_fifo) return {nullptr, nullptr};
+
+  Value fifo_out = write_to_fifo.getFifoSlot();
+  ktdf::DataTransferOp store_transfer;
+  store_stage.getBody()->walk([&](ktdf::DataTransferOp dt) {
+    if (dt.isSourceFifo() && dt.isDestMemRef() && dt.getSource() == fifo_out) {
+      store_transfer = dt;
+      return WalkResult::interrupt();
+    }
+    return WalkResult::advance();
+  });
+  return {store_transfer, write_to_fifo};
 }
