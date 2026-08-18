@@ -1,6 +1,7 @@
 // RUN: dataflow-scheduler-opt --reduction-dim-chunking="chunk-size-threshold=8192"  %s | FileCheck %s --check-prefix=CHECK-N4
 // RUN: dataflow-scheduler-opt --reduction-dim-chunking="chunk-size-threshold=16384" %s | FileCheck %s --check-prefix=CHECK-N2
 
+
 // Test: auto-infer num_chunks from chunk-size-threshold (no --num-chunks flag).
 //
 // Input: tensor<1x256x64xf16>  (reduction dim 1, size 256)
@@ -13,6 +14,17 @@
 // The two RUN lines verify that distinct thresholds produce distinct chunk-loop
 // bounds and FIFO sizes, confirming ReductionChunkAnalysis drives the pass
 // correctly in auto-infer mode.
+
+
+
+
+// This script is intended to make adding checks to a test case quick and easy.
+// It is *not* authoritative about what constitutes a good test. After using the
+// script, be sure to review and refine the generated checks. For example,
+// For comprehensive guidelines, see:
+//   * https://mlir.llvm.org/getting_started/TestingGuide/
+
+
 
 
 
@@ -62,9 +74,8 @@
 // CHECK-N4-NEXT:           scf.for %[[VAL_3:.*]] = %[[CONSTANT_0]] to %[[CONSTANT_3]] step %[[CONSTANT_1]] {
 // CHECK-N4-NEXT:             %[[CONSTANT_4:.*]] = arith.constant 0 : index
 // CHECK-N4-NEXT:             %[[CONSTANT_5:.*]] = arith.constant 1 : index
-// CHECK-N4-NEXT:             %[[CONSTANT_6:.*]] = arith.constant 64 : index
-// CHECK-N4-NEXT:             %[[CONSTANT_7:.*]] = arith.constant 4 : index
-// CHECK-N4-NEXT:             scf.for %[[VAL_4:.*]] = %[[CONSTANT_4]] to %[[CONSTANT_7]] step %[[CONSTANT_5]] {
+// CHECK-N4-NEXT:             %[[CONSTANT_6:.*]] = arith.constant 4 : index
+// CHECK-N4-NEXT:             scf.for %[[VAL_4:.*]] = %[[CONSTANT_4]] to %[[CONSTANT_6]] step %[[CONSTANT_5]] {
 // CHECK-N4-NEXT:               %[[CMPI_0:.*]] = arith.cmpi eq, %[[VAL_4]], %[[CONSTANT_4]] : index
 // CHECK-N4-NEXT:               ktdf.pipeline {
 // CHECK-N4-NEXT:                 %[[PRIVATE_1:.*]]:4 = ktdf.private -> (!ktdf.fifo.slot<"L1LU" -> "SFU", 4096xf16>, !ktdf.fifo.slot<"SFU" -> "L1SU", 64xf16>, !ktdf.token, !ktdf.token) {
@@ -77,8 +88,7 @@
 // CHECK-N4-NEXT:                 ktdf.stage depends_in(none) depends_out(%[[VAL_5:.*]]#2) {
 // CHECK-N4-NEXT:                   %[[SUBI_1:.*]] = arith.subi %[[VAL_3]], %[[CONSTANT_4]] : index
 // CHECK-N4-NEXT:                   %[[DIVSI_1:.*]] = arith.divsi %[[SUBI_1]], %[[CONSTANT_5]] : index
-// CHECK-N4-NEXT:                   %[[MULI_0:.*]] = arith.muli %[[VAL_4]], %[[CONSTANT_6]] : index
-// CHECK-N4-NEXT:                   ktdf.data_transfer from %[[VAL_2]]#0{{\[}}%[[DIVSI_1]], %[[CONSTANT_4]], %[[MULI_0]], %[[CONSTANT_4]]] size [1, 1, 64, 64] to %[[VAL_5]]#0 size [4096] : memref<2x1x256x64xf16, "L1">, !ktdf.fifo.slot<"L1LU" -> "SFU", 4096xf16>
+// CHECK-N4-NEXT:                   ktdf.data_transfer from %[[VAL_2]]#0{{\[}}%[[DIVSI_1]], %[[CONSTANT_4]], %[[VAL_4]] * 64, %[[CONSTANT_4]]] size [1, 1, 64, 64] to %[[VAL_5]]#0 size [4096] : memref<2x1x256x64xf16, "L1">, !ktdf.fifo.slot<"L1LU" -> "SFU", 4096xf16>
 // CHECK-N4-NEXT:                   scf.if %[[CMPI_0]] {
 // CHECK-N4-NEXT:                   } else {
 // CHECK-N4-NEXT:                     ktdf.data_transfer from %[[VAL_2]]#1{{\[}}%[[DIVSI_1]], %[[CONSTANT_4]], %[[CONSTANT_4]]] size [1, 1, 64] to %[[VAL_5]]#1 size [64] : memref<2x1x64xf16, "L1">, !ktdf.fifo.slot<"SFU" -> "L1SU", 64xf16>
@@ -170,9 +180,8 @@
 // CHECK-N2-NEXT:           scf.for %[[VAL_3:.*]] = %[[CONSTANT_0]] to %[[CONSTANT_3]] step %[[CONSTANT_1]] {
 // CHECK-N2-NEXT:             %[[CONSTANT_4:.*]] = arith.constant 0 : index
 // CHECK-N2-NEXT:             %[[CONSTANT_5:.*]] = arith.constant 1 : index
-// CHECK-N2-NEXT:             %[[CONSTANT_6:.*]] = arith.constant 128 : index
-// CHECK-N2-NEXT:             %[[CONSTANT_7:.*]] = arith.constant 2 : index
-// CHECK-N2-NEXT:             scf.for %[[VAL_4:.*]] = %[[CONSTANT_4]] to %[[CONSTANT_7]] step %[[CONSTANT_5]] {
+// CHECK-N2-NEXT:             %[[CONSTANT_6:.*]] = arith.constant 2 : index
+// CHECK-N2-NEXT:             scf.for %[[VAL_4:.*]] = %[[CONSTANT_4]] to %[[CONSTANT_6]] step %[[CONSTANT_5]] {
 // CHECK-N2-NEXT:               %[[CMPI_0:.*]] = arith.cmpi eq, %[[VAL_4]], %[[CONSTANT_4]] : index
 // CHECK-N2-NEXT:               ktdf.pipeline {
 // CHECK-N2-NEXT:                 %[[PRIVATE_1:.*]]:4 = ktdf.private -> (!ktdf.fifo.slot<"L1LU" -> "SFU", 8192xf16>, !ktdf.fifo.slot<"SFU" -> "L1SU", 64xf16>, !ktdf.token, !ktdf.token) {
@@ -185,8 +194,7 @@
 // CHECK-N2-NEXT:                 ktdf.stage depends_in(none) depends_out(%[[VAL_5:.*]]#2) {
 // CHECK-N2-NEXT:                   %[[SUBI_1:.*]] = arith.subi %[[VAL_3]], %[[CONSTANT_4]] : index
 // CHECK-N2-NEXT:                   %[[DIVSI_1:.*]] = arith.divsi %[[SUBI_1]], %[[CONSTANT_5]] : index
-// CHECK-N2-NEXT:                   %[[MULI_0:.*]] = arith.muli %[[VAL_4]], %[[CONSTANT_6]] : index
-// CHECK-N2-NEXT:                   ktdf.data_transfer from %[[VAL_2]]#0{{\[}}%[[DIVSI_1]], %[[CONSTANT_4]], %[[MULI_0]], %[[CONSTANT_4]]] size [1, 1, 128, 64] to %[[VAL_5]]#0 size [8192] : memref<2x1x256x64xf16, "L1">, !ktdf.fifo.slot<"L1LU" -> "SFU", 8192xf16>
+// CHECK-N2-NEXT:                   ktdf.data_transfer from %[[VAL_2]]#0{{\[}}%[[DIVSI_1]], %[[CONSTANT_4]], %[[VAL_4]] * 128, %[[CONSTANT_4]]] size [1, 1, 128, 64] to %[[VAL_5]]#0 size [8192] : memref<2x1x256x64xf16, "L1">, !ktdf.fifo.slot<"L1LU" -> "SFU", 8192xf16>
 // CHECK-N2-NEXT:                   scf.if %[[CMPI_0]] {
 // CHECK-N2-NEXT:                   } else {
 // CHECK-N2-NEXT:                     ktdf.data_transfer from %[[VAL_2]]#1{{\[}}%[[DIVSI_1]], %[[CONSTANT_4]], %[[CONSTANT_4]]] size [1, 1, 64] to %[[VAL_5]]#1 size [64] : memref<2x1x64xf16, "L1">, !ktdf.fifo.slot<"SFU" -> "L1SU", 64xf16>

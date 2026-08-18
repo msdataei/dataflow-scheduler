@@ -70,6 +70,7 @@
 #include "mlir/Dialect/MemRef/IR/MemRef.h"
 #include "mlir/Dialect/SCF/IR/SCF.h"
 #include "mlir/Dialect/Tensor/IR/Tensor.h"
+#include "mlir/IR/AffineMap.h"
 #include "mlir/IR/Builders.h"
 #include "mlir/IR/BuiltinOps.h"
 #include "mlir/IR/IRMapping.h"
@@ -485,12 +486,6 @@ struct ReductionDimChunkingPass
     Value c0 = arith::ConstantIndexOp::create(rewriter, loc, 0);
     Value c1 = arith::ConstantIndexOp::create(rewriter, loc, 1);
 
-    // Per-dim chunk_size Value constants (emitted before the outermost loop).
-    SmallVector<Value> c_chunk_sizes;
-    for (int64_t cs : chunk_sizes)
-      c_chunk_sizes.push_back(
-          arith::ConstantIndexOp::create(rewriter, loc, cs));
-
     // Per-dim num_chunks Value constants (emitted before the outermost loop).
     SmallVector<Value> c_per_dim_num_chunks;
     for (int64_t nc : per_dim_num_chunks)
@@ -583,8 +578,8 @@ struct ReductionDimChunkingPass
     buildLoadStage(pipe_bldr, loc, tok0, load_units, condition, batch_iv,
                    input_memref, input_memref_type, partial_memref,
                    output_memref_type, out_fifo_type, fifo_in, fifo_out,
-                   chunk_fifo_elements, reduction_dims, chunk_sizes, n_dims,
-                   dim_ivs, c_chunk_sizes, c0, emit_l1_idx);
+                   chunk_fifo_elements, reduction_dims, chunk_sizes, dim_ivs,
+                   c0, emit_l1_idx);
 
     buildComputeStage(pipe_bldr, loc, tok0, tok1, compute_units, condition,
                       fifo_in, fifo_out, chunk_input_tensor_type,
@@ -621,8 +616,7 @@ struct ReductionDimChunkingPass
       MemRefType output_memref_type, ktdf::FifoSlotType out_fifo_type,
       Value fifo_in, Value fifo_out, int64_t chunk_fifo_elements,
       ArrayRef<int64_t> reduction_dims, ArrayRef<int64_t> chunk_sizes,
-      size_t n_dims, ArrayRef<Value> dim_ivs, ArrayRef<Value> c_chunk_sizes,
-      Value c0,
+      ArrayRef<Value> dim_ivs, Value c0,
       llvm::function_ref<Value(OpBuilder&, Location, Value)> emit_l1_idx) {
     auto stage = ktdf::StageOp::create(pipe_bldr, loc,
                                        /*depends_in=*/ValueRange{},
@@ -632,42 +626,58 @@ struct ReductionDimChunkingPass
     OpBuilder b(stage.getBody(), stage.getBody()->end());
     Value l1_idx = emit_l1_idx(b, loc, batch_iv);
 
-    // Per-reduction-dim row offsets: iv_j * chunk_size[j].
-    SmallVector<Value> row_offsets;
-    row_offsets.reserve(n_dims);
-    for (size_t j = 0; j < n_dims; ++j)
-      row_offsets.push_back(
-          arith::MulIOp::create(b, loc, dim_ivs[j], c_chunk_sizes[j]));
-
-    // Build source indices and static sizes together.
+    // Build source indices, static sizes, and an AffineMap for the
+    // data_transfer together.
+    //
     // dim-0 of the memref is the batch/L1 slot (index = l1_idx, size = 1).
     // dims 1..rank-1 map to generic dims 0..rank-2:
-    //   - reduction dim → offset = row_offset[j], size = chunk_size[j]
-    //   - parallel dim  → offset = 0,             size = full dim size
+    //   - reduction dim j → index operand = dim_ivs[j],
+    //                        map result    = d_j * chunk_size[j]  (affine),
+    //                        static size   = chunk_size[j]
+    //   - parallel dim    → index operand = c0,
+    //                        map result    = d_k  (identity),
+    //                        static size   = full dim size
+    //
+    // Encoding iv * chunk_size inside the AffineMap avoids emitting an
+    // arith.muli SSA value as an index operand, which the backend does not
+    // support.
     int64_t input_rank = input_memref_type.getRank();
     SmallVector<Value> src_indices;
     SmallVector<int64_t> src_static_sizes;
+    SmallVector<AffineExpr> map_results;
     src_indices.reserve(static_cast<size_t>(input_rank));
     src_static_sizes.reserve(static_cast<size_t>(input_rank));
+    map_results.reserve(static_cast<size_t>(input_rank));
+
+    // dim-0: batch/L1 slot.
     src_indices.push_back(l1_idx);
     src_static_sizes.push_back(1);
+    map_results.push_back(getAffineDimExpr(0, b.getContext()));
+
+    // dims 1..rank-1.
     for (int64_t i = 1; i < input_rank; ++i) {
       int64_t generic_dim = i - 1;
       auto it = llvm::find(reduction_dims, generic_dim);
+      unsigned dim_idx = static_cast<unsigned>(i);
       if (it != reduction_dims.end()) {
         size_t j = static_cast<size_t>(it - reduction_dims.begin());
-        src_indices.push_back(row_offsets[j]);
+        src_indices.push_back(dim_ivs[j]);
         src_static_sizes.push_back(chunk_sizes[j]);
+        // iv_j * chunk_size[j]: constant multiplication stays in the map.
+        map_results.push_back(getAffineDimExpr(dim_idx, b.getContext()) *
+                              chunk_sizes[j]);
       } else {
         src_indices.push_back(c0);
         src_static_sizes.push_back(input_memref_type.getDimSize(i));
+        map_results.push_back(getAffineDimExpr(dim_idx, b.getContext()));
       }
     }
 
-    AffineMap input_id =
-        AffineMap::getMultiDimIdentityMap(input_rank, b.getContext());
+    AffineMap input_map =
+        AffineMap::get(static_cast<unsigned>(input_rank),
+                       /*symbolCount=*/0, map_results, b.getContext());
     ktdf::DataTransferOp::create(
-        b, loc, input_memref, input_id, src_indices, src_static_sizes, fifo_in,
+        b, loc, input_memref, input_map, src_indices, src_static_sizes, fifo_in,
         AffineMap{}, ValueRange{}, ArrayRef<int64_t>{chunk_fifo_elements});
 
     // On non-first iterations, feed the partial accumulator into fifo_out so

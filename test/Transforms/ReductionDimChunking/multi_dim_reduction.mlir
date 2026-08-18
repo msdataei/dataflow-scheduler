@@ -20,6 +20,16 @@
 
 
 
+// This script is intended to make adding checks to a test case quick and easy.
+// It is *not* authoritative about what constitutes a good test. After using the
+// script, be sure to review and refine the generated checks. For example,
+// For comprehensive guidelines, see:
+//   * https://mlir.llvm.org/getting_started/TestingGuide/
+
+
+
+
+
 // CHECK: #[[$ATTR_0:.+]] = affine_map<(d0, d1, d2) -> (d0, d1, d2)>
 // CHECK: #[[$ATTR_1:.+]] = affine_map<(d0, d1, d2) -> (d2)>
 // CHECK: #[[$ATTR_2:.+]] = affine_set<(d0, d1, d2) : (d0 >= 0, -d0 + 1 >= 0, d1 >= 0, -d1 + 255 >= 0, d2 >= 0, -d2 + 63 >= 0)>
@@ -63,12 +73,10 @@
 // CHECK-NEXT:           scf.for %[[VAL_3:.*]] = %[[CONSTANT_0]] to %[[CONSTANT_1]] step %[[CONSTANT_1]] {
 // CHECK-NEXT:             %[[CONSTANT_3:.*]] = arith.constant 0 : index
 // CHECK-NEXT:             %[[CONSTANT_4:.*]] = arith.constant 1 : index
-// CHECK-NEXT:             %[[CONSTANT_5:.*]] = arith.constant 1 : index
-// CHECK-NEXT:             %[[CONSTANT_6:.*]] = arith.constant 64 : index
-// CHECK-NEXT:             %[[CONSTANT_7:.*]] = arith.constant 2 : index
-// CHECK-NEXT:             %[[CONSTANT_8:.*]] = arith.constant 4 : index
-// CHECK-NEXT:             scf.for %[[VAL_4:.*]] = %[[CONSTANT_3]] to %[[CONSTANT_7]] step %[[CONSTANT_4]] {
-// CHECK-NEXT:               scf.for %[[VAL_5:.*]] = %[[CONSTANT_3]] to %[[CONSTANT_8]] step %[[CONSTANT_4]] {
+// CHECK-NEXT:             %[[CONSTANT_5:.*]] = arith.constant 2 : index
+// CHECK-NEXT:             %[[CONSTANT_6:.*]] = arith.constant 4 : index
+// CHECK-NEXT:             scf.for %[[VAL_4:.*]] = %[[CONSTANT_3]] to %[[CONSTANT_5]] step %[[CONSTANT_4]] {
+// CHECK-NEXT:               scf.for %[[VAL_5:.*]] = %[[CONSTANT_3]] to %[[CONSTANT_6]] step %[[CONSTANT_4]] {
 // CHECK-NEXT:                 %[[CMPI_0:.*]] = arith.cmpi eq, %[[VAL_4]], %[[CONSTANT_3]] : index
 // CHECK-NEXT:                 %[[CMPI_1:.*]] = arith.cmpi eq, %[[VAL_5]], %[[CONSTANT_3]] : index
 // CHECK-NEXT:                 %[[ANDI_0:.*]] = arith.andi %[[CMPI_0]], %[[CMPI_1]] : i1
@@ -83,9 +91,7 @@
 // CHECK-NEXT:                   ktdf.stage depends_in(none) depends_out(%[[VAL_6:.*]]#2) {
 // CHECK-NEXT:                     %[[SUBI_0:.*]] = arith.subi %[[VAL_3]], %[[CONSTANT_3]] : index
 // CHECK-NEXT:                     %[[DIVSI_0:.*]] = arith.divsi %[[SUBI_0]], %[[CONSTANT_4]] : index
-// CHECK-NEXT:                     %[[MULI_0:.*]] = arith.muli %[[VAL_4]], %[[CONSTANT_5]] : index
-// CHECK-NEXT:                     %[[MULI_1:.*]] = arith.muli %[[VAL_5]], %[[CONSTANT_6]] : index
-// CHECK-NEXT:                     ktdf.data_transfer from %[[VAL_2]]#0{{\[}}%[[DIVSI_0]], %[[MULI_0]], %[[MULI_1]], %[[CONSTANT_3]]] size [1, 1, 64, 64] to %[[VAL_6]]#0 size [4096] : memref<1x2x256x64xf16, "L1">, !ktdf.fifo.slot<"L1LU" -> "SFU", 4096xf16>
+// CHECK-NEXT:                     ktdf.data_transfer from %[[VAL_2]]#0{{\[}}%[[DIVSI_0]], %[[VAL_4]], %[[VAL_5]] * 64, %[[CONSTANT_3]]] size [1, 1, 64, 64] to %[[VAL_6]]#0 size [4096] : memref<1x2x256x64xf16, "L1">, !ktdf.fifo.slot<"L1LU" -> "SFU", 4096xf16>
 // CHECK-NEXT:                     scf.if %[[ANDI_0]] {
 // CHECK-NEXT:                     } else {
 // CHECK-NEXT:                       ktdf.data_transfer from %[[VAL_2]]#1{{\[}}%[[DIVSI_0]], %[[CONSTANT_3]]] size [1, 64] to %[[VAL_6]]#1 size [64] : memref<1x64xf16, "L1">, !ktdf.fifo.slot<"SFU" -> "L1SU", 64xf16>
