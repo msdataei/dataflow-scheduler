@@ -691,18 +691,20 @@ struct ReductionLoopExposurePass
       //
       // Two cases for the map result at the reduction dimension d:
       //
-      //   a) It is an affine constant (e.g. 0) — the pre-chunking shape.
+      //   a) It is a zero constant — the pre-chunking shape (index = 0).
       //      Append a new dim for the reduction IV and replace the result.
       //      Combined index: nested.ivs[i]
       //
-      //   b) It is an AffineDimExpr pointing at an existing operand — meaning
-      //      ReductionDimChunking has already placed a runtime chunk-base value
-      //      (e.g. %arg1 * chunk_size) in that slot.  We must keep that base
-      //      and add the new reduction IV on top of it.
-      //      Replace that existing operand with nested.ivs[i] and fold the
-      //      old base back into the map expression as:
-      //        new_result[d] = old_dim_expr + new_dim_expr
+      //   b) It is any non-zero expression — ReductionDimChunking has already
+      //      encoded a chunk-base offset here (e.g. d_j * chunk_size where
+      //      d_j is the chunk loop IV).  We must keep that base and add the
+      //      new reduction IV on top:
+      //        new_result[d] = existing + new_dim_expr
       //      so the combined index is: chunk_base + nested.ivs[i].
+      //
+      // Note: after ReductionDimChunking the expression is AffineBinaryOpExpr
+      // (d_j * chunk_size), not a bare AffineDimExpr, so we cannot use
+      // dyn_cast<AffineDimExpr> as the discriminant — use isZero() instead.
       std::optional<AffineMap> maybe_map = dt.getSourceMap();
       if (!maybe_map) return;
       AffineMap map = *maybe_map;
@@ -718,18 +720,17 @@ struct ReductionLoopExposurePass
         if (d >= new_results.size()) continue;
 
         AffineExpr existing = new_results[d];
-        if (auto dim_expr = dyn_cast<AffineDimExpr>(existing)) {
-          // Case (b): existing runtime operand is the chunk-base offset.
-          // Introduce a new dim for nested.ivs[i] and form base + iv.
-          unsigned new_dim = base_iv_dim + extra_dims++;
-          new_results[d] = dim_expr + getAffineDimExpr(new_dim, ctx);
-          new_indices.push_back(nested.ivs[i]);
+        unsigned new_dim = base_iv_dim + extra_dims++;
+        AffineExpr new_iv_expr = getAffineDimExpr(new_dim, ctx);
+        auto const_expr = dyn_cast<AffineConstantExpr>(existing);
+        if (const_expr && const_expr.getValue() == 0) {
+          // Case (a): no prior chunking — replace outright with the IV.
+          new_results[d] = new_iv_expr;
         } else {
-          // Case (a): constant or other affine expression — replace outright.
-          unsigned new_dim = base_iv_dim + extra_dims++;
-          new_results[d] = getAffineDimExpr(new_dim, ctx);
-          new_indices.push_back(nested.ivs[i]);
+          // Case (b): chunk-base already encoded — add the reduction IV.
+          new_results[d] = existing + new_iv_expr;
         }
+        new_indices.push_back(nested.ivs[i]);
       }
 
       AffineMap new_map = AffineMap::get(base_iv_dim + extra_dims,
