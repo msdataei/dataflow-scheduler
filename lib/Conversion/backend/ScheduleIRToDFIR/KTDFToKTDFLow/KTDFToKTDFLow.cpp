@@ -152,6 +152,24 @@ static llvm::SmallVector<mlir::scf::ForOp, 2> collectDependentLoops(
   for (mlir::ktdf::DataTransferOp xfer : store_transfers)
     for (mlir::Value idx : xfer.getDestIndices()) worklist.push_back(idx);
 
+  // Also seed with the condition of any scf.if that directly guards a
+  // load transfer.  This covers the pattern where the scratchpad address
+  // is constant (e.g. always [%arg0, 0, 0]) but the transfer is guarded by
+  // "if (%chunk_iv != 0)" — the chunk IV then doesn't appear in the address
+  // but does appear in the guard condition and is the real dependent loop IV.
+  for (mlir::ktdf::DataTransferOp xfer : load_transfers) {
+    // Walk up from the transfer to find the nearest enclosing scf.if inside
+    // the load stage, and add its condition operands to the worklist.
+    for (mlir::Operation* p = xfer->getParentOp(); p; p = p->getParentOp()) {
+      if (auto if_op = mlir::dyn_cast<mlir::scf::IfOp>(p)) {
+        worklist.push_back(if_op.getCondition());
+        break;
+      }
+      // Stop at the stage boundary — don't escape into enclosing stages.
+      if (mlir::isa<mlir::ktdf::StageOp>(p)) break;
+    }
+  }
+
   while (!worklist.empty()) {
     mlir::Value v = worklist.pop_back_val();
     if (!visited.insert(v).second) continue;
