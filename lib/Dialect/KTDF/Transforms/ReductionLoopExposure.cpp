@@ -533,6 +533,35 @@ struct ReductionLoopExposurePass
 
     Value fifo_in = new_priv.getResult(fifo_in_idx);
 
+    // fifo_in_partial: the other FIFO-dest transfer in the load stage — the
+    // one that conditionally sends the previous chunk's partial result to the
+    // compute stage for accumulator seeding.  It is any FIFO-dest transfer
+    // whose destination is not fifo_in.
+    Value fifo_in_partial;
+    load_stage.getBody()->walk([&](ktdf::DataTransferOp dt) {
+      if (dt.isDestFifo() && dt.getDestination() != fifo_in) {
+        fifo_in_partial = dt.getDestination();
+        return WalkResult::interrupt();
+      }
+      return WalkResult::advance();
+    });
+
+    // is_first_chunk: the i1 condition that guards the scf.if in the load
+    // stage (true on the first chunk, which skips the partial transfer).
+    // It is the condition of the first scf.if in the load stage body.
+    Value is_first_chunk;
+    load_stage.getBody()->walk([&](scf::IfOp if_op) {
+      is_first_chunk = if_op.getCondition();
+      return WalkResult::interrupt();
+    });
+
+    if (fifo_in_partial && !is_first_chunk) {
+      inner_pipeline.emitError(
+          PASS_NAME
+          ": found partial FIFO but no scf.if condition in load stage");
+      return failure();
+    }
+
     // fifo_out: the fifo_slot operand of the write_to_fifo in compute_stage
     // (already updated to new_priv after RAUW above).
     Value fifo_out;
@@ -596,13 +625,14 @@ struct ReductionLoopExposurePass
       if (stage == compute_stage) {
         rewriteComputeStage(rewriter, loc, ctx, stage, generic_op,
                             one_row_tensor_type, output_tensor_type, fifo_in,
-                            fifo_out, dim_sizes, start, step, last_vals);
+                            fifo_out, fifo_in_partial, is_first_chunk,
+                            dim_sizes, start, step, last_vals);
       } else if (stage == conditional_store_stage) {
         rewriteConditionalStoreStage(rewriter, loc, ctx, stage, dim_sizes,
                                      start, step, last_vals);
       } else if (stage == load_stage) {
         rewriteLoadStage(rewriter, loc, ctx, stage, dim_sizes, start, step,
-                         reduction_dims, slice_tensor_type.getRank());
+                         reduction_dims, slice_tensor_type.getRank(), fifo_in);
       } else {
         rewritePlainStage(rewriter, loc, ctx, stage, dim_sizes, start, step);
       }
@@ -645,123 +675,191 @@ struct ReductionLoopExposurePass
   }
 
   // -------------------------------------------------------------------------
-  // Rewrite the load stage like rewritePlainStage, then for each reduction
-  // dimension i set source_sizes[reduction_dim_i] = 1 and substitute
-  // source_map result[reduction_dim_i] with the corresponding loop IV.
+  // Patch a single main-input data_transfer that is already inside the
+  // innermost reduction loop: shrink its source sizes at every reduction
+  // dimension to 1 and add the corresponding loop IV to its source map.
+  //
+  // Two cases for the map result at reduction dimension d:
+  //   a) Zero constant (pre-chunking) — replace with the loop IV.
+  //   b) Non-zero expression (post-chunking chunk-base) — add the loop IV.
+  // -------------------------------------------------------------------------
+  void patchInputTransfer(ktdf::DataTransferOp dt,
+                          const NestedForResult& nested,
+                          ArrayRef<int64_t> reduction_dims, int64_t tensor_rank,
+                          MLIRContext* ctx) {
+    auto sizes_attr = dt.getStaticSourceSizes();
+    if (!sizes_attr) return;
+    int64_t memref_rank = static_cast<int64_t>(sizes_attr->size());
+    // Stage coarsening may have introduced extra leading dimensions into the
+    // source memref (to express additional granularity), so the reduction
+    // dimensions sit at an offset from the right relative to the linalg
+    // tensor rank.
+    int64_t rank_offset = memref_rank - tensor_rank;
+
+    // --- 1. Set size to 1 at each memref reduction dimension ---
+    SmallVector<int64_t> new_sizes(sizes_attr->begin(), sizes_attr->end());
+    for (size_t i = 0; i < reduction_dims.size(); ++i) {
+      unsigned dim = static_cast<unsigned>(reduction_dims[i] + rank_offset);
+      if (dim < new_sizes.size()) {
+        new_sizes[dim] = 1;
+      }
+    }
+    dt.setStaticSourceSizesAttr(DenseI64ArrayAttr::get(ctx, new_sizes));
+
+    // --- 2. Rewrite source_map + source_indices ---
+    // The source indices are AffineMap operands, not a flat per-dimension
+    // list — constant indices live inside the map as affine constants.
+    //
+    // Two cases for the map result at the reduction dimension d:
+    //
+    //   a) It is a zero constant — the pre-chunking shape (index = 0).
+    //      Append a new dim for the reduction IV and replace the result.
+    //      Combined index: nested.ivs[i]
+    //
+    //   b) It is any non-zero expression — ReductionDimChunking has already
+    //      encoded a chunk-base offset here (e.g. d_j * chunk_size where
+    //      d_j is the chunk loop IV).  We must keep that base and add the
+    //      new reduction IV on top:
+    //        new_result[d] = existing + new_dim_expr
+    //      so the combined index is: chunk_base + nested.ivs[i].
+    //
+    // Note: after ReductionDimChunking the expression is AffineBinaryOpExpr
+    // (d_j * chunk_size), not a bare AffineDimExpr, so we cannot use
+    // dyn_cast<AffineDimExpr> as the discriminant — use isZero() instead.
+    std::optional<AffineMap> maybe_map = dt.getSourceMap();
+    if (!maybe_map) return;
+    AffineMap map = *maybe_map;
+
+    unsigned base_iv_dim = map.getNumDims();
+    SmallVector<AffineExpr> new_results(map.getResults().begin(),
+                                        map.getResults().end());
+    SmallVector<Value> new_indices(dt.getSourceIndices().begin(),
+                                   dt.getSourceIndices().end());
+    unsigned extra_dims = 0;
+    for (size_t i = 0; i < reduction_dims.size(); ++i) {
+      unsigned dim = static_cast<unsigned>(reduction_dims[i] + rank_offset);
+      if (dim >= new_results.size()) {
+        continue;
+      }
+
+      AffineExpr existing = new_results[dim];
+      unsigned new_dim = base_iv_dim + extra_dims++;
+      AffineExpr new_iv_expr = getAffineDimExpr(new_dim, ctx);
+      auto const_expr = dyn_cast<AffineConstantExpr>(existing);
+      if (const_expr && const_expr.getValue() == 0) {
+        // Case (a): no prior chunking — replace outright with the IV.
+        new_results[dim] = new_iv_expr;
+      } else {
+        // Case (b): chunk-base already encoded — add the reduction IV.
+        new_results[dim] = existing + new_iv_expr;
+      }
+      new_indices.push_back(nested.ivs[i]);
+    }
+
+    AffineMap new_map = AffineMap::get(base_iv_dim + extra_dims,
+                                       map.getNumSymbols(), new_results, ctx);
+    dt.setSourceMapAttr(AffineMapAttr::get(new_map));
+    dt.getSourceIndicesMutable().assign(new_indices);
+  }
+
+  // -------------------------------------------------------------------------
+  // Rewrite the load stage:
+  //   - The partial accumulator transfer (scf.if that conditionally sends the
+  //     previous chunk's result) stays outside the reduction loop — it is a
+  //     once-per-chunk operation.
+  //   - The main input transfer (dest == fifo_in) is moved inside the new
+  //     reduction scf.for loop, with its source size and address patched.
   //
   // Example (reduction_dim=1 in a 1x256x64 tensor, source memref 2x1x256x64):
   //   before: data_transfer from %src[%b, 0, 0, 0] size [1, 1, 256, 64]
-  //                          to %fifo size [16384]
-  //   after:  scf.for %r = 0 to 256 {
+  //                          to fifo_in size [16384]
+  //           scf.if %is_first {} else {
+  //             data_transfer from %partial[...] to fifo_in_partial size [64]
+  //           }
+  //   after:  scf.if %is_first {} else {
+  //             data_transfer from %partial[...] to fifo_in_partial size [64]
+  //           }
+  //           scf.for %r = 0 to 256 {
   //             data_transfer from %src[%b, 0, %r, 0] size [1, 1, 1, 64]
-  //                            to %fifo size [64]
+  //                            to fifo_in size [64]
   //           }
   // -------------------------------------------------------------------------
   void rewriteLoadStage(IRRewriter& rewriter, Location loc, MLIRContext* ctx,
                         ktdf::StageOp stage, ArrayRef<int64_t> dim_sizes,
                         Value start, Value step,
-                        ArrayRef<int64_t> reduction_dims, int64_t tensor_rank) {
-    auto nested =
-        rewritePlainStage(rewriter, loc, ctx, stage, dim_sizes, start, step);
+                        ArrayRef<int64_t> reduction_dims, int64_t tensor_rank,
+                        Value fifo_in) {
+    Block* body = stage.getBody();
 
-    // nested.ivs[i] is the IV corresponding to reduction_dims[i].
-    nested.innermost_loop.getBody()->walk([&](ktdf::DataTransferOp dt) {
-      if (!dt.isDestFifo()) return;
-
-      auto sizes_attr = dt.getStaticSourceSizes();
-      if (!sizes_attr) return;
-      int64_t memref_rank = static_cast<int64_t>(sizes_attr->size());
-      // Stage coarsening may have introduced extra leading dimensions into the
-      // source memref (to express additional granularity), so the reduction
-      // dimensions sit at an offset from the right relative to the linalg
-      // tensor rank.
-      int64_t rank_offset = memref_rank - tensor_rank;
-
-      // --- 1. Set size to 1 at each memref reduction dimension ---
-      SmallVector<int64_t> new_sizes(sizes_attr->begin(), sizes_attr->end());
-      for (size_t i = 0; i < reduction_dims.size(); ++i) {
-        unsigned d = static_cast<unsigned>(reduction_dims[i] + rank_offset);
-        if (d < new_sizes.size()) new_sizes[d] = 1;
+    // Find the main input transfer (dest == fifo_in).
+    ktdf::DataTransferOp main_transfer;
+    body->walk([&](ktdf::DataTransferOp dt) {
+      if (dt.isDestFifo() && dt.getDestination() == fifo_in) {
+        main_transfer = dt;
+        return WalkResult::interrupt();
       }
-      dt.setStaticSourceSizesAttr(DenseI64ArrayAttr::get(ctx, new_sizes));
-
-      // --- 2. Rewrite source_map + source_indices ---
-      // The source indices are AffineMap operands, not a flat per-dimension
-      // list — constant indices live inside the map as affine constants.
-      //
-      // Two cases for the map result at the reduction dimension d:
-      //
-      //   a) It is a zero constant — the pre-chunking shape (index = 0).
-      //      Append a new dim for the reduction IV and replace the result.
-      //      Combined index: nested.ivs[i]
-      //
-      //   b) It is any non-zero expression — ReductionDimChunking has already
-      //      encoded a chunk-base offset here (e.g. d_j * chunk_size where
-      //      d_j is the chunk loop IV).  We must keep that base and add the
-      //      new reduction IV on top:
-      //        new_result[d] = existing + new_dim_expr
-      //      so the combined index is: chunk_base + nested.ivs[i].
-      //
-      // Note: after ReductionDimChunking the expression is AffineBinaryOpExpr
-      // (d_j * chunk_size), not a bare AffineDimExpr, so we cannot use
-      // dyn_cast<AffineDimExpr> as the discriminant — use isZero() instead.
-      std::optional<AffineMap> maybe_map = dt.getSourceMap();
-      if (!maybe_map) return;
-      AffineMap map = *maybe_map;
-
-      unsigned base_iv_dim = map.getNumDims();
-      SmallVector<AffineExpr> new_results(map.getResults().begin(),
-                                          map.getResults().end());
-      SmallVector<Value> new_indices(dt.getSourceIndices().begin(),
-                                     dt.getSourceIndices().end());
-      unsigned extra_dims = 0;
-      for (size_t i = 0; i < reduction_dims.size(); ++i) {
-        unsigned d = static_cast<unsigned>(reduction_dims[i] + rank_offset);
-        if (d >= new_results.size()) continue;
-
-        AffineExpr existing = new_results[d];
-        unsigned new_dim = base_iv_dim + extra_dims++;
-        AffineExpr new_iv_expr = getAffineDimExpr(new_dim, ctx);
-        auto const_expr = dyn_cast<AffineConstantExpr>(existing);
-        if (const_expr && const_expr.getValue() == 0) {
-          // Case (a): no prior chunking — replace outright with the IV.
-          new_results[d] = new_iv_expr;
-        } else {
-          // Case (b): chunk-base already encoded — add the reduction IV.
-          new_results[d] = existing + new_iv_expr;
-        }
-        new_indices.push_back(nested.ivs[i]);
-      }
-
-      AffineMap new_map = AffineMap::get(base_iv_dim + extra_dims,
-                                         map.getNumSymbols(), new_results, ctx);
-      dt.setSourceMapAttr(AffineMapAttr::get(new_map));
-      dt.getSourceIndicesMutable().assign(new_indices);
+      return WalkResult::advance();
     });
+
+    // If we cannot identify the main transfer, fall back to wrapping everything
+    // (original behaviour) — keeps the pass safe for pipelines without a
+    // partial accumulator path.
+    if (!main_transfer) {
+      auto nested =
+          rewritePlainStage(rewriter, loc, ctx, stage, dim_sizes, start, step);
+      nested.innermost_loop.getBody()->walk([&](ktdf::DataTransferOp dt) {
+        if (dt.isDestFifo()) {
+          patchInputTransfer(dt, nested, reduction_dims, tensor_rank, ctx);
+        }
+      });
+      return;
+    }
+
+    // Build the reduction loop shell at the end of the stage body (after all
+    // existing ops), so the scf.if for the partial stays before the loop.
+    rewriter.setInsertionPointToEnd(body);
+    auto nested =
+        buildNestedForLoops(rewriter, loc, ctx, dim_sizes, start, step);
+
+    // Move the main input transfer into the innermost loop body (before yield).
+    Block* inner_body = nested.innermost_loop.getBody();
+    Operation* inner_term = inner_body->getTerminator();
+    main_transfer->moveBefore(inner_term);
+
+    // Patch sizes and address map of the main transfer now that it is inside
+    // the reduction loop.
+    patchInputTransfer(main_transfer, nested, reduction_dims, tensor_rank, ctx);
   }
 
   // -------------------------------------------------------------------------
   // Rewrite the compute stage with N nested scf.for loops (one per
-  // reduction dim), each carrying the accumulator tensor as iter_arg:
+  // reduction dim), each carrying the accumulator tensor as iter_arg.
   //
-  //   %empty = tensor.empty()                        (before outermost loop)
-  //   scf.for %r0 = 0 to D0 iter_args(%a0 = %empty)
-  //     {loop_type = reduction_loop}
-  //     scf.for %r1 = 0 to D1 iter_args(%a1 = %a0)
-  //       ...
-  //         read_from_fifo → %slice
-  //         linalg.generic(%slice, %aInner) → %updated
-  //         if (all ivs == last): write_to_fifo %updated, fifo_out
-  //         scf.yield %updated
-  //       ...
-  //     scf.yield %r1_result
+  // The accumulator seed is determined before the outermost loop:
+  //   - On the first chunk (is_first_chunk == true): tensor.empty (zero init).
+  //   - On subsequent chunks: read the previous partial result from
+  //     fifo_in_partial.
+  //
+  //   %seed = scf.if %is_first -> tensor<...> {
+  //     %e = tensor.empty(); scf.yield %e
+  //   } else {
+  //     %p = ktdf.read_from_fifo fifo_in_partial; scf.yield %p
+  //   }
+  //   scf.for %r0 = 0 to D0 iter_args(%a0 = %seed) {loop_type = reduction}
+  //     ...
+  //       %slice = ktdf.read_from_fifo fifo_in
+  //       %updated = linalg.generic(%slice, %aInner)
+  //       if (all ivs == last): ktdf.write_to_fifo %updated, fifo_out
+  //       scf.yield %updated
+  //     ...
   //   scf.yield %r0_result
   // -------------------------------------------------------------------------
   void rewriteComputeStage(IRRewriter& rewriter, Location loc, MLIRContext* ctx,
                            ktdf::StageOp stage, linalg::GenericOp generic_op,
                            RankedTensorType one_row_tensor_type,
                            RankedTensorType output_tensor_type, Value fifo_in,
-                           Value fifo_out, ArrayRef<int64_t> dim_sizes,
+                           Value fifo_out, Value fifo_in_partial,
+                           Value is_first_chunk, ArrayRef<int64_t> dim_sizes,
                            Value start, Value step, ArrayRef<Value> last_vals) {
     Block* body = stage.getBody();
 
@@ -771,14 +869,44 @@ struct ReductionLoopExposurePass
 
     rewriter.setInsertionPointToStart(body);
 
-    // Accumulator initialiser — emitted once, outside all loops.
-    auto empty =
-        tensor::EmptyOp::create(rewriter, loc, output_tensor_type.getShape(),
-                                output_tensor_type.getElementType());
+    // Accumulator seed: when a partial FIFO path exists, on the first chunk
+    // zero-init via tensor.empty; on subsequent chunks read the previous
+    // partial result from fifo_in_partial.  When there is no partial path
+    // (pipeline has no accumulator feedback), always use tensor.empty.
+    Value seed;
+    if (fifo_in_partial && is_first_chunk) {
+      // Build the seed scf.if with an else region.  The regions start empty,
+      // so we use OpBuilder::atBlockBegin (not getTerminator()) to populate
+      // them before inserting the scf.yield terminator.
+      auto seed_if =
+          scf::IfOp::create(rewriter, loc, TypeRange{output_tensor_type},
+                            is_first_chunk, /*withElseRegion=*/true);
+      {
+        Block& then_block = seed_if.getThenRegion().front();
+        OpBuilder then_b = OpBuilder::atBlockBegin(&then_block);
+        auto empty =
+            tensor::EmptyOp::create(then_b, loc, output_tensor_type.getShape(),
+                                    output_tensor_type.getElementType());
+        scf::YieldOp::create(then_b, loc, ValueRange{empty.getResult()});
+      }
+      {
+        Block& else_block = seed_if.getElseRegion().front();
+        OpBuilder else_b = OpBuilder::atBlockBegin(&else_block);
+        auto partial_read = ktdf::ReadFromFifoOp::create(
+            else_b, loc, output_tensor_type, fifo_in_partial);
+        scf::YieldOp::create(else_b, loc, ValueRange{partial_read.getResult()});
+      }
+      seed = seed_if.getResult(0);
+    } else {
+      auto empty =
+          tensor::EmptyOp::create(rewriter, loc, output_tensor_type.getShape(),
+                                  output_tensor_type.getElementType());
+      seed = empty.getResult();
+    }
 
     // Build the nested loops, threading the accumulator through each level.
     auto nested = buildNestedForLoops(rewriter, loc, ctx, dim_sizes, start,
-                                      step, ValueRange{empty.getResult()});
+                                      step, ValueRange{seed});
 
     // Now populate the innermost loop body (before its yield).
     scf::ForOp innermost = nested.innermost_loop;
