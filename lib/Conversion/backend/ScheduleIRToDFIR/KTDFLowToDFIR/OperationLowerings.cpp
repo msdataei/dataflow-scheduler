@@ -41,6 +41,7 @@
 #include "dataflow-scheduler/Utils/SchedulerExtContext.h"
 #include "llvm/ADT/SmallVector.h"
 #include "mlir/Dialect/Arith/IR/Arith.h"
+#include "mlir/Dialect/MemRef/IR/MemRef.h"
 #include "mlir/Dialect/SCF/IR/SCF.h"
 #include "mlir/IR/PatternMatch.h"
 #include "mlir/Support/LogicalResult.h"
@@ -559,6 +560,36 @@ struct LowerSignalPattern
   }
 };
 
+/// Lower a memref.copy whose source is a ktdf.read_from_fifo (memref form).
+///
+/// MapReductionPartials emits:
+///   %r  = ktdf.read_from_fifo ... -> memref<...>
+///   memref.copy %r, %dest
+///
+/// Runs at higher benefit (2) than FoldEmptyCopy (1, a canonicalization
+/// pattern) so it fires first, preventing FoldEmptyCopy from crashing on
+/// opaque memory-space attributes.
+/// Lowers the copy to agen.vector_store of the source value into the dest.
+struct LowerMemRefCopyFromFifoPattern
+    : public mlir::OpRewritePattern<mlir::memref::CopyOp> {
+  LowerMemRefCopyFromFifoPattern(mlir::MLIRContext* context,
+                                 arch_view::ResourceKinds& /*resource_kinds*/)
+      : OpRewritePattern(context, /*benefit=*/2) {}
+
+  mlir::LogicalResult matchAndRewrite(
+      mlir::memref::CopyOp copy_op,
+      mlir::PatternRewriter& rewriter) const override {
+    if (!copy_op.getSource().getDefiningOp<mlir::ktdf::ReadFromFifoOp>())
+      return mlir::failure();
+
+    rewriter.setInsertionPoint(copy_op);
+    emitVectorStore(rewriter, copy_op.getLoc(), copy_op.getSource(),
+                    copy_op.getTarget());
+    rewriter.eraseOp(copy_op);
+    return mlir::success();
+  }
+};
+
 }  // namespace
 
 mlir::LogicalResult scheduler::runOperationLowerings(
@@ -569,6 +600,8 @@ mlir::LogicalResult scheduler::runOperationLowerings(
   // Lower linalg.generic compute operations and FIFO operations
   mlir::RewritePatternSet patterns(func.getContext());
   populateLinalgLoweringPatterns(patterns, resource_kinds);
+  patterns.add<LowerMemRefCopyFromFifoPattern>(func.getContext(),
+                                               resource_kinds);
   patterns.add<LowerReadFromFifoPattern>(func.getContext(), resource_kinds,
                                          components);
   patterns.add<LowerWriteToFifoPattern>(func.getContext(), resource_kinds,
