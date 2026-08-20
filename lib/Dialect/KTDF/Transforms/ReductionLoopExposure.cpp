@@ -26,9 +26,10 @@
 //   2. Collect reduction_dims[] and their per-dimension sizes dim_sizes[].
 //      The total shrink factor R = product(dim_sizes[]).
 //   3. Get the parent ktdf.pipeline of the compute stage.
-//   4. Find the load stage (upstream of compute via depends_in/depends_out
-//      token chain).  Identify the FIFO-dest data_transfer that feeds
-//      linalg.generic ins() — its destination is fifo_in.
+//   4. Find the load stage via StageFactory::findLoadStage (upstream of
+//      compute via depends_in/depends_out token chain).  Identify the
+//      FIFO-dest data_transfer that feeds linalg.generic ins() — its
+//      destination is fifo_in.
 //   5. Shrink only fifo_in in ktdf.private (divide its element count by R).
 //      Patch the corresponding fifo.allocate inside the private body to match.
 //   6. Patch every data_transfer inside the pipeline whose source or
@@ -45,9 +46,10 @@
 //      - write_to_fifo is wrapped in scf.if (all ivs == last) in the
 //        innermost loop body.
 //      - The outermost loop is tagged {loop_type = reduction_loop}.
-//   9. Find the conditional-store stage (downstream of compute via
-//      depends_out/depends_in token chain).  Wrap its data_transfer in
-//      scf.if (all ivs == last) inside the innermost already-created scf.for.
+//   9. Find the conditional-store stage via StageFactory::findStoreStage
+//      (downstream of compute via depends_out/depends_in token chain).
+//      Wrap its data_transfer in scf.if (all ivs == last) inside the
+//      innermost already-created scf.for.
 //
 //===----------------------------------------------------------------------===//
 
@@ -56,6 +58,7 @@
 
 #include "dataflow-scheduler/Dialect/KTDF/KTDF.h"
 #include "dataflow-scheduler/Dialect/KTDF/Transforms/Passes.h"
+#include "dataflow-scheduler/Dialect/KTDF/Transforms/ReductionUtils.h"
 #include "dataflow-scheduler/Dialect/KTDF/Utils/Utils.h"
 #include "llvm/ADT/DenseSet.h"
 #include "llvm/Support/DebugLog.h"
@@ -461,7 +464,7 @@ struct ReductionLoopExposurePass
     }
 
     ktdf::StageOp load_stage =
-        ktdf::findLoadStage(inner_pipeline, compute_stage);
+        ktdf::StageFactory::findLoadStage(inner_pipeline, compute_stage);
     if (!load_stage) {
       inner_pipeline.emitError(
           PASS_NAME ": cannot find load stage upstream of compute stage");
@@ -616,7 +619,7 @@ struct ReductionLoopExposurePass
     // 3. Find the "conditional store" stage.
     // -----------------------------------------------------------------------
     ktdf::StageOp conditional_store_stage =
-        ktdf::findStoreStage(inner_pipeline, compute_stage);
+        ktdf::StageFactory::findStoreStage(inner_pipeline, compute_stage);
 
     // -----------------------------------------------------------------------
     // 4. Rewrite every stage.
