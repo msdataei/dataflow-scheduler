@@ -76,58 +76,76 @@ def ReductionLoopExposurePass : Pass<"reduction-loop-exposure", "mlir::ModuleOp"
   let summary = "Expose the reduction loop of a linalg.generic as an explicit scf.for with a loop-carry accumulator";
   let description = [{
     Walks the module for any ktdf.stage that contains a linalg.generic with a
-    reduction iterator (the compute stage).  For each one found it rewrites the
-    parent ktdf.pipeline so that the reduction becomes an explicit scf.for loop:
+    reduction iterator (the Compute stage).  For each one found it rewrites the
+    parent ktdf.pipeline so that the reduction becomes one nested scf.for loop
+    per reduction dimension, with the accumulator tensor threaded as iter_args.
 
-    Before (StageCoarsening output):
-    (R is the size of the reduction dimension)
+    The pass may be composed with ReductionDimChunking.  When the input has
+    already been chunked, the Load stage body contains a scf.if that feeds
+    the previous chunk's partial result into fifo_partial on non-first
+    iterations; the pass preserves that scf.if outside the new reduction loop.
 
-      ktdf.private: [fifo_in(R*C elements), fifo_out(C elements), ...]
+    Before (R_i = size of reduction dimension i; C = non-reduction elements):
 
-      load stage:    data_transfer  L1 -> fifo_in   (full R*C slice)
-      compute stage: read_from_fifo -> tensor<1xRxCxf16>
-                     linalg.generic (reduction) -> tensor<1xCxf16>
-                     write_to_fifo
-      store stage:   data_transfer  fifo_out -> L1
+      ktdf.private: [fifo_in(R_0*...*R_n*C elements), fifo_out(C elements), ...]
+
+      Load stage:    data_transfer  src -> fifo_in   (full R_0*...*R_n*C slice)
+      Compute stage: read_from_fifo fifo_in -> tensor<..xR_0x..xR_nxCxf16>
+                     linalg.generic (reduction) -> tensor<..xCxf16>
+                     write_to_fifo fifo_out
+      Store stage:   data_transfer  fifo_out -> dst
 
     After:
 
-      ktdf.private: all FifoSlotType results whose element count is a
-                    multiple of R are shrunk by dividing by R.
-                    (e.g. fifo_in: R*C -> C elements)
+      ktdf.private: fifo_in element count shrunk by R = product(R_i).
+                    (fifo_in: R*C -> C elements; other FIFOs unchanged.)
 
-      load stage:    scf.for %r = 0 to R           -- all original ops inside
-                       data_transfer L1 -> fifo_in  (static dest size / R)
-      compute stage: %init = tensor.empty : tensor<1xCxf16>
-                     scf.for %r = 0 to R iter_args(%carry = %init)
+      Load stage:    scf.if %is_first \{} else \{ partial transfer }  (preserved outside loop)
+                     scf.for %r0 = 0 to R_0 {
+                       scf.for %r1 = 0 to R_1 { ...
+                         data_transfer src[..,%r0,.,%r1,..] -> fifo_in  (size C)
+                       }
+                     }
+      Compute stage: %seed = scf.if %is_first -> tensor<..xCxf16> {
+                       tensor.empty
+                     } else {
+                       read_from_fifo fifo_partial
+                     }
+                     scf.for %r0 = 0 to R_0 iter_args(%a = %seed)
                          {loop_type = reduction_loop}
-                       slice  = read_from_fifo -> tensor<1x1xCxf16>
-                       %carry = linalg.generic (unchanged) ins(slice) outs(%carry)
-                       if (%r == R-1): write_to_fifo %carry
-                       scf.yield %carry
-      store stage:   scf.for %r = 0 to R           -- all original ops inside
-                       if (%r == R-1): data_transfer fifo_out -> L1
+                       scf.for %r1 = 0 to R_1 iter_args(%a = %a) { ...
+                         %slice = read_from_fifo fifo_in -> tensor<..x1x..x1xCxf16>
+                         %a     = linalg.generic ins(%slice) outs(%a)
+                         if (all ivs == last): write_to_fifo %a, fifo_out
+                         scf.yield %a
+                       }
+                     scf.yield %r0_result
+      Store stage:   scf.for %r0 = 0 to R_0 {
+                       scf.for %r1 = 0 to R_1 { ...
+                         if (all ivs == last): data_transfer fifo_out -> dst
+                       }
+                     }
 
-    Any data_transfer in any stage whose source or destination is a shrunken
-    FIFO has its static sizes divided by R automatically.
+    Any data_transfer in any stage whose source or destination is the
+    shrunken fifo_in has its static source sizes divided by R automatically.
+    The source AffineMap is extended with fresh dimensions for the reduction
+    loop IVs so the correct per-iteration slice is addressed.
 
     Stage identification is structural, not string-based:
-    - Load stage:    the sibling whose depends_out token matches the compute
-                     stage's depends_in token; must have exactly one
-                     FIFO-dest data_transfer (fails with error if > 1).
+    - Load stage:    the sibling whose depends_out token matches the Compute
+                     stage's depends_in token.
     - Compute stage: contains a linalg.generic with a reduction iterator.
-    - Store stage:   the sibling whose depends_in token matches the compute
+    - Store stage:   the sibling whose depends_in token matches the Compute
                      stage's depends_out token (SSA identity check).
-    - All other stages: wrapped verbatim in scf.for, nothing else modified.
+    - All other stages: wrapped verbatim in scf.for loops, nothing else
+                        modified.
 
     Preconditions (checked; pass skips cleanly if not met):
     - A ktdf.stage somewhere in the module contains a linalg.generic with
       at least one statically-sized reduction iterator.
     - That stage is a direct child of a ktdf.pipeline with a ktdf.private.
-    - At least one FifoSlotType result in ktdf.private has element count
-      divisible by R (used to identify and shrink participating FIFOs).
-    - The load stage has exactly one FIFO-dest data_transfer; the compute
-      stage has exactly one write_to_fifo.
+    - The input FIFO (fifo_in) element count is divisible by R.
+    - The Compute stage has exactly one write_to_fifo.
   }];
   let constructor = "::mlir::ktdf::createReductionLoopExposurePass()";
   let dependentDialects = [
@@ -219,41 +237,43 @@ def MapReductionPartialsPass : Pass<"map-reduction-partials", "mlir::ModuleOp"> 
 def ReductionDimChunkingPass : Pass<"reduction-dim-chunking", "mlir::ModuleOp"> {
   let summary = "Split the reduction dimension of inner linalg.generic ops into sequential chunks";
   let description = [{
-    This pass targets the inner L1LU→SFU→L1SU pipeline that contains a
+    This pass targets the inner Load→Compute→Store pipeline that contains a
     linalg.generic with a reduction iterator.  It replaces that single
-    pipeline with a scf.for over all num_chunks iterations, each iteration
-    containing one ktdf.pipeline (Load / SFU / Store stages).
+    pipeline with nested scf.for loops — one per reduction dimension that
+    has more than one chunk — each innermost iteration containing one
+    ktdf.pipeline (Load / Compute / Store stages).
     First-vs-rest accumulation behaviour is selected at runtime via
-    `%is_first = arith.cmpi eq, %chunk, %c0`:
+    `%condition = AND(iv_j == 0 for all active chunk loop IVs)`:
 
-      Load stage : always transfers the current input slice to fifo_in.
-                   When !is_first, also transfers the partial accumulator
-                   (the existing L1 output buffer) to fifo_out so the SFU
-                   can read it back.
-      SFU stage  : when is_first, initialises the output tensor with
-                   tensor.empty; otherwise reads the partial result from
-                   fifo_out.  The linalg.generic and write_to_fifo are
-                   unconditional.
-      Store stage: unconditionally writes fifo_out back to the L1 output
-                   buffer; no is_last distinction is needed.
+      Load stage   : transfers the current input chunk slice to fifo_in.
+                     When !condition, also transfers the partial accumulator
+                     (the existing L1 output buffer) to fifo_partial so the
+                     Compute stage can read it back.
+      Compute stage: when condition, initialises the output tensor with
+                     tensor.empty; otherwise reads the partial result from
+                     fifo_partial.  Runs the linalg.generic and writes its
+                     result to fifo_out unconditionally.
+      Store stage  : unconditionally reads fifo_out (the result written by
+                     the Compute stage) and writes it back to the L1 output
+                     buffer.
 
-    The existing L1 output buffer (discovered via the store-stage
+    The existing L1 output buffer (discovered via the Store stage's
     data_transfer destination) is reused as the partial-accumulation
     buffer — no new memref is allocated.
 
     Preconditions (checked, pass aborts cleanly if not met):
-    - The module contains exactly one outer ktdf.pipeline with three stages
-      (MNILU, compute, MNISU) matching the StageCoarsening output shape.
-    - The compute stage contains a scf.for (batch loop) whose body is a
-      single ktdf.pipeline with three stages: L1LU, SFU, L1SU.
-    - The SFU stage body contains exactly one linalg.generic with at least
-      one `reduction` iterator type.
+    - The module contains a ktdf.pipeline with three sibling stages matching
+      the StageCoarsening output shape: a Load stage, a Compute stage, and
+      a Store stage.
+    - The Compute stage contains a scf.for (batch loop) whose body is a
+      single ktdf.pipeline with three stages: Load, Compute, Store.
+    - The inner Compute stage body contains exactly one linalg.generic with
+      at least one `reduction` iterator type.
 
     Option `num-chunks` sets the static chunk count per reduction dim (one
     value per dim, in iterator-type order).  Values may differ across dims;
-    the total number of sequential pipeline invocations equals the product of
-    all per-dim counts and a single flat loop de-interleaves per-dim indices
-    via row-major strides.  When omitted (the default), the pass infers the
+    the pass emits one nested scf.for per dim (dims with chunk count 1
+    produce no loop).  When omitted (the default), the pass infers the
     chunk count automatically from the input tensor size and the
     `chunk-size-threshold` option: it picks the smallest integer N ≥ 1 such
     that (total_input_bytes / N) ≤ chunk-size-threshold AND N evenly divides
@@ -268,10 +288,9 @@ def ReductionDimChunkingPass : Pass<"reduction-dim-chunking", "mlir::ModuleOp"> 
     ListOption<"numChunks", "num-chunks", "unsigned",
                "Number of sequential chunks per reduction dimension (one value "
                "per reduction dim, in iterator-type order).  Values may differ "
-               "across dims; the pass uses a single flat loop of length "
-               "product(num-chunks) and de-interleaves per-dim indices via "
-               "row-major strides.  When empty (the default) the pass infers "
-               "the chunk count from chunk-size-threshold.">,
+               "across dims; the pass emits one nested scf.for per dim (dims "
+               "with chunk count 1 produce no loop).  When empty (the default) "
+               "the pass infers the chunk count from chunk-size-threshold.">,
     Option<"chunkSizeThreshold", "chunk-size-threshold", "int64_t",
            "1048576",
            "Per-chunk size budget in bytes used for automatic numChunks "
