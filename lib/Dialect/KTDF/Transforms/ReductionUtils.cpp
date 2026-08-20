@@ -107,12 +107,12 @@ void StageFactory::buildLoadStage(
 
   OpBuilder b(stage.getBody(), stage.getBody()->end());
   Value c0 = arith::ConstantIndexOp::create(b, loc_, 0);
-  Value l1_idx = emitL1Idx(b, c0);
+  Value local_slot_idx = emitLocalSlotIdx(b, c0);
 
   // Build the shared source index vector and AffineMap for all in-slots.
   //
-  // dim-0 of the memref is the batch/L1 slot (index = l1_idx, size = 1).
-  // dims 1..rank-1 correspond to linalg.generic dims 0..rank-2:
+  // dim-0 of the memref is the batch/local slot (index = local_slot_idx, size =
+  // 1). dims 1..rank-1 correspond to linalg.generic dims 0..rank-2:
   //   - reduction dim j → index operand = dim_ivs[j],
   //                        map result    = d_j * chunk_size[j]  (affine),
   //                        static size   = chunk_size[j]
@@ -131,8 +131,8 @@ void StageFactory::buildLoadStage(
   src_static_sizes.reserve(static_cast<size_t>(input_rank));
   map_results.reserve(static_cast<size_t>(input_rank));
 
-  // dim-0: batch/L1 slot.
-  src_indices.push_back(l1_idx);
+  // dim-0: batch/local slot.
+  src_indices.push_back(local_slot_idx);
   src_static_sizes.push_back(1);
   map_results.push_back(getAffineDimExpr(0, b.getContext()));
 
@@ -184,7 +184,7 @@ void StageFactory::buildLoadStage(
     SmallVector<int64_t> partial_src_sizes;
     partial_src_indices.reserve(static_cast<size_t>(partial_rank));
     partial_src_sizes.reserve(static_cast<size_t>(partial_rank));
-    partial_src_indices.push_back(l1_idx);
+    partial_src_indices.push_back(local_slot_idx);
     partial_src_sizes.push_back(1);
     for (int64_t i = 1; i < partial_rank; ++i) {
       partial_src_indices.push_back(c0);
@@ -265,7 +265,7 @@ void StageFactory::buildStoreStage(Value partial_memref,
 
   OpBuilder b(stage.getBody(), stage.getBody()->end());
   Value c0 = arith::ConstantIndexOp::create(b, loc_, 0);
-  Value l1_idx = emitL1Idx(b, c0);
+  Value local_slot_idx = emitLocalSlotIdx(b, c0);
 
   auto dest_memref_type = cast<MemRefType>(partial_memref.getType());
   int64_t dest_rank = dest_memref_type.getRank();
@@ -275,7 +275,7 @@ void StageFactory::buildStoreStage(Value partial_memref,
   SmallVector<int64_t> dest_sizes;
   dest_indices.reserve(static_cast<size_t>(dest_rank));
   dest_sizes.reserve(static_cast<size_t>(dest_rank));
-  dest_indices.push_back(l1_idx);
+  dest_indices.push_back(local_slot_idx);
   dest_sizes.push_back(1);
   for (int64_t i = 1; i < dest_rank; ++i) {
     dest_indices.push_back(c0);
@@ -292,7 +292,7 @@ void StageFactory::buildStoreStage(Value partial_memref,
   }
 }
 
-Value StageFactory::emitL1Idx(OpBuilder& bldr, Value c0) {
+Value StageFactory::emitLocalSlotIdx(OpBuilder& bldr, Value c0) {
   Value c1 = arith::ConstantIndexOp::create(bldr, loc_, 1);
   Value sub = arith::SubIOp::create(bldr, loc_, batch_iv_, c0);
   return arith::DivSIOp::create(bldr, loc_, sub, c1);

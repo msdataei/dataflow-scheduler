@@ -121,8 +121,8 @@ struct ChunkPipelineConfig {
 // The ChunkPipelineConfig carries all slot-type lists and the token count, so
 // no per-slot index arguments need to be passed to the stage builders.
 //
-// The L1-index arithmetic (batch_iv → L1 slot index) is encapsulated in
-// emitL1Idx() and never needs to be passed as a parameter.
+// The local slot index arithmetic (batch_iv → local slot index) is encapsulated
+// in emitLocalSlotIdx() and never needs to be passed as a parameter.
 //
 // This class can be reused whenever a 3-stage Load / Compute / Store pipeline
 // is required.
@@ -181,14 +181,14 @@ class StageFactory {
   //   condition          — i1 value; true on the first chunk iteration.
   //   input_memref       — source buffer for the input chunk.
   //   input_memref_type  — type of input_memref (cached to avoid re-cast).
-  //   partial_memref     — L1 buffer reused as the partial accumulator.
-  //   output_memref_type — type of partial_memref (cached to avoid re-cast).
-  //   reduction_dims     — linalg.generic dims that are being chunked.
-  //   chunk_sizes        — size of one chunk along each reduction dim.
+  //   partial_memref     — local memory buffer reused as the partial
+  //   accumulator. output_memref_type — type of partial_memref (cached to avoid
+  //   re-cast). reduction_dims     — linalg.generic dims that are being
+  //   chunked. chunk_sizes        — size of one chunk along each reduction dim.
   //   dim_ivs            — loop IVs (or c0) for each reduction dim.
   //   cfg                — slot layout and token count for this pipeline.
   //
-  // Input memref layout: dim-0 is the batch/L1 slot index; dims 1..rank-1
+  // Input memref layout: dim-0 is the batch/local slot index; dims 1..rank-1
   // correspond to linalg.generic dims 0..rank-2.  For reduction dims the
   // source offset is encoded as iv_j * chunk_size[j] in the AffineMap (to
   // avoid emitting arith.muli, which the backend does not accept as an index).
@@ -231,14 +231,15 @@ class StageFactory {
   // Emit the Store stage inside a chunk pipeline.
   //
   // For each slot in cfg.out_slot_types: unconditionally reads the reduction
-  // result from fifo_out[i] and writes it back to partial_memref (the L1
-  // partial-accumulation buffer).
+  // result from fifo_out[i] and writes it back to partial_memref (the local
+  // memory partial-accumulation buffer).
   //
   // Token assignment follows the ChunkPipelineConfig convention:
   //   token n_tokens-1 : Compute → Store (depends_in).
   //
   // Parameters:
-  //   partial_memref — L1 destination buffer (same as the one the Load
+  //   partial_memref — local memory destination buffer (same as the one the
+  //   Load
   //                    stage reads the running partial result from).
   //   cfg            — slot layout and token count for this pipeline.
   // -------------------------------------------------------------------------
@@ -289,13 +290,13 @@ class StageFactory {
  private:
   // -------------------------------------------------------------------------
   // Emit (batch_iv_ - 0) / 1 — the normalised affine form expected by the
-  // backend for L1-slot index arithmetic.
+  // backend for local-slot index arithmetic.
   //
   // c0 must be emitted by the caller inside the stage body (ktdf.pipeline
   // only allows ktdf.stage and ktdf.private as immediate children, so
   // constants cannot be emitted at pipeline scope).
   // -------------------------------------------------------------------------
-  Value emitL1Idx(OpBuilder& b, Value c0);
+  Value emitLocalSlotIdx(OpBuilder& b, Value c0);
 
   OpBuilder& pipe_bldr_;  // Builder positioned at the pipeline body end.
   Location loc_;          // Location for all emitted ops.

@@ -127,7 +127,8 @@ def ReductionLoopExposurePass : Pass<"reduction-loop-exposure", "mlir::ModuleOp"
                      }
 
     Any data_transfer in any stage whose source or destination is the
-    shrunken fifo_in has its static source sizes divided by R automatically.
+    shrunken fifo_in has its static source sizes divided by R (where
+    R = product(R_i)) automatically.
     The source AffineMap is extended with fresh dimensions for the reduction
     loop IVs so the correct per-iteration slice is addressed.
 
@@ -144,7 +145,8 @@ def ReductionLoopExposurePass : Pass<"reduction-loop-exposure", "mlir::ModuleOp"
     - A ktdf.stage somewhere in the module contains a linalg.generic with
       at least one statically-sized reduction iterator.
     - That stage is a direct child of a ktdf.pipeline with a ktdf.private.
-    - The input FIFO (fifo_in) element count is divisible by R.
+    - The input FIFO (fifo_in) element count is divisible by R (where
+      R = product(R_i)).
     - The Compute stage has exactly one write_to_fifo.
   }];
   let constructor = "::mlir::ktdf::createReductionLoopExposurePass()";
@@ -247,17 +249,17 @@ def ReductionDimChunkingPass : Pass<"reduction-dim-chunking", "mlir::ModuleOp"> 
 
       Load stage   : transfers the current input chunk slice to fifo_in.
                      When !condition, also transfers the partial accumulator
-                     (the existing L1 output buffer) to fifo_partial so the
+                     (the existing local memory output buffer) to fifo_partial so the
                      Compute stage can read it back.
       Compute stage: when condition, initialises the output tensor with
                      tensor.empty; otherwise reads the partial result from
                      fifo_partial.  Runs the linalg.generic and writes its
                      result to fifo_out unconditionally.
       Store stage  : unconditionally reads fifo_out (the result written by
-                     the Compute stage) and writes it back to the L1 output
+                     the Compute stage) and writes it back to the local memory output
                      buffer.
 
-    The existing L1 output buffer (discovered via the Store stage's
+    The existing local memory output buffer (discovered via the Store stage's
     data_transfer destination) is reused as the partial-accumulation
     buffer — no new memref is allocated.
 

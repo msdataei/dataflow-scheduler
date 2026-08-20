@@ -23,13 +23,13 @@
 // The pass operates on the shape produced by StageCoarsening.  It expects a
 // top-level ktdf.pipeline with three sibling stages:
 //
-//   stage-0 (Load)   : DDR → L1
+//   stage-0 (Load)   : global memory → local memory
 //   stage-1 (Compute): outer scf.for (batch) whose body is a single inner
 //                       ktdf.pipeline with three stages:
-//                         stage-a (Load)   : L1 → FIFO
+//                         stage-a (Load)   : local memory → FIFO
 //                         stage-b (Compute): linalg.generic reduce
-//                         stage-c (Store)  : FIFO → L1
-//   stage-2 (Store)  : L1 → DDR
+//                         stage-c (Store)  : FIFO → local memory
+//   stage-2 (Store)  : local memory → global memory
 //
 // The transformation replaces the single inner ktdf.pipeline with nested
 // scf.for loops — one per reduction dimension that has more than one chunk.
@@ -41,18 +41,19 @@
 //
 //   Load stage   : transfers each input chunk slice (memref → fifo_in[i]).
 //                  When !condition, also transfers the partial accumulator
-//                  (L1 output buffer → fifo_partial[i]) so the Compute stage
-//                  can read it back.
+//                  (local memory output buffer → fifo_partial[i]) so the
+//                  Compute stage can read it back.
 //   Compute stage: when condition, initialises the output tensor with
 //                  tensor.empty; otherwise reads the partial result from
 //                  fifo_partial.  The linalg.generic and write_to_fifo are
 //                  unconditional.
-//   Store stage  : unconditionally writes each fifo_out[i] back to the L1
+//   Store stage  : unconditionally writes each fifo_out[i] back to the local
+//   memory
 //                  output buffer.
 //
-// The existing L1 output buffer (discovered via the original Store stage's
-// data_transfer destination) is reused as the partial-accumulation buffer;
-// no new memref is allocated.
+// The existing local memory output buffer (discovered via the original Store
+// stage's data_transfer destination) is reused as the partial-accumulation
+// buffer; no new memref is allocated.
 //
 //===----------------------------------------------------------------------===//
 
