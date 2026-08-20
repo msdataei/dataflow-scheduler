@@ -412,7 +412,7 @@ struct ReductionLoopExposurePass
 
       // linalg.generic must always be directly nested inside a ktdf.stage.
       auto stage = generic->getParentOfType<ktdf::StageOp>();
-      if (!stage) return WalkResult::advance();
+      assert(stage && "linalg.generic must be nested inside a ktdf.stage");
 
       if (seen.insert(stage).second) compute_stages.push_back(stage);
       return WalkResult::advance();
