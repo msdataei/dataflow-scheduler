@@ -121,6 +121,14 @@ target_link_libraries(DataflowSchedulerDialectsKTDFArchTransforms PUBLIC
 target_compile_definitions(DataflowSchedulerDialectsKTDFArchTransforms PRIVATE
   DATAFLOW_SCHEDULER_ENABLE_KTIR
 )
+# add_mlir_library(ENABLE_AGGREGATION) internally creates an OBJECT library
+# target named obj.<name> where the .cpp files are actually compiled. The
+# target_compile_definitions above only reaches the interface target, so we
+# must repeat the define on the OBJECT target to make
+# #ifdef DATAFLOW_SCHEDULER_ENABLE_KTIR active in the translation units.
+target_compile_definitions(obj.DataflowSchedulerDialectsKTDFArchTransforms PRIVATE
+  DATAFLOW_SCHEDULER_ENABLE_KTIR
+)
 
 add_dependencies(dataflow-scheduler-headers dataflow-scheduler-dialects-headers ktir-headers)
 add_dependencies(dataflow-scheduler-doc dataflow-scheduler-dialects-doc ktir-doc)
