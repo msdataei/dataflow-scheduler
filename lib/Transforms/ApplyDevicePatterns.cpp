@@ -32,6 +32,7 @@
 #include "dataflow-scheduler/Dialect/KTDFArch/Transforms/ApplyPatterns.h"
 #include "dataflow-scheduler/Dialect/VectorChain/VectorChain.h"  // IWYU pragma: keep
 #include "dataflow-scheduler/Transforms/Passes.h"
+#include "dataflow-scheduler/Transforms/SpyreOpReductionConstraints.h"
 
 #define PASS_NAME "apply-device-patterns"
 #define DEBUG_TYPE PASS_NAME
@@ -55,8 +56,7 @@ class PatternCache : public mlir::ktdf_arch::PatternCache {
 
   void registerNativeFunctions(mlir::PDLPatternModule& patterns) final {
     mlir::ktdf_arch::PatternCache::registerNativeFunctions(patterns);
-
-    // TODO: Register additional native functions.
+    registerSpyreOpReductionConstraints(patterns);
   }
 
   MLIR_DEFINE_EXPLICIT_INTERNAL_INLINE_TYPE_ID(PatternCache)
