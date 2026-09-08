@@ -161,6 +161,52 @@ auto ktdfIsReductionKind(mlir::PatternRewriter& /*rewriter*/,
   return mlir::success();
 }
 
+// Constraint: ktdf.is_precision(op, expected_prec)
+//
+// Succeeds when `op` (linalg.generic) operates on element type matching
+// `expected_prec` ("fp16", "fp32", "bf16").
+auto ktdfIsPrecision(mlir::PatternRewriter& /*rewriter*/,
+                     mlir::PDLResultList& /*results*/,
+                     llvm::ArrayRef<mlir::PDLValue> values)
+    -> mlir::LogicalResult {
+  assert(values.size() == 2);
+  auto generic = llvm::dyn_cast_if_present<mlir::linalg::GenericOp>(
+      values[0].cast<mlir::Operation*>());
+  if (!generic) {
+    return mlir::failure();
+  }
+
+  auto expected = llvm::dyn_cast_if_present<mlir::StringAttr>(
+      values[1].cast<mlir::Attribute>());
+  if (!expected) {
+    return mlir::failure();
+  }
+
+  if (generic.getOutputs().empty()) {
+    return mlir::failure();
+  }
+  auto output_type = generic.getOutputs().front().getType();
+  mlir::Type elem_type = output_type;
+  if (auto memref = mlir::dyn_cast<mlir::MemRefType>(output_type)) {
+    elem_type = memref.getElementType();
+  } else if (auto shaped = mlir::dyn_cast<mlir::ShapedType>(output_type)) {
+    elem_type = shaped.getElementType();
+  }
+
+  llvm::StringRef prec;
+  if (elem_type.isF16()) {
+    prec = "fp16";
+  } else if (elem_type.isF32()) {
+    prec = "fp32";
+  } else if (elem_type.isBF16()) {
+    prec = "bf16";
+  } else {
+    return mlir::failure();
+  }
+
+  return mlir::success(prec == expected.getValue());
+}
+
 class PatternCache : public mlir::ktdf_arch::PatternCache {
  public:
   using mlir::ktdf_arch::PatternCache::PatternCache;
@@ -172,6 +218,7 @@ class PatternCache : public mlir::ktdf_arch::PatternCache {
                                         ktdfIsInnerDimReduction);
     patterns.registerConstraintFunction("ktdf.is_reduction_kind",
                                         ktdfIsReductionKind);
+    patterns.registerConstraintFunction("ktdf.is_precision", ktdfIsPrecision);
     patterns.registerRewriteFunction("ktdf.subview_source", ktdfSubviewSource);
   }
 
