@@ -151,7 +151,7 @@ struct LowerReadFromFifoPattern
       mlir::ktdf_arch::ExecutionUnitOp compute) {
     auto vector_type = mlir::cast<mlir::VectorType>(received.getType());
     switch (mode) {
-      case mlir::ktdf::SplatMode::FirstSubSimdLaneToAllSubSimdLanes: {
+      case mlir::ktdf::SplatMode::FirstSubSimdLaneToEachSubSimd: {
         const int64_t group =
             compute.getFeature<mlir::ktdf_arch::feature::SIMD>()
                 .getSubSimdLanes(vector_type.getElementType());
@@ -161,6 +161,11 @@ struct LowerReadFromFifoPattern
               "ktdf_arch.feature.simd = { sub_simd_lanes = ... } for this "
               "element type");
         }
+        // Each sub-SIMD group splats its first element to all other lanes in
+        // the group. For this to be well-defined, every sub-SIMD group must
+        // have a first element — i.e. the data received through the FIFO
+        // (vector_type.getNumElements() lanes) must be evenly divisible by
+        // the sub-SIMD group width.
         if (vector_type.getNumElements() % group != 0) {
           return read_op.emitError("sub-SIMD group width ")
                  << group << " does not divide the "

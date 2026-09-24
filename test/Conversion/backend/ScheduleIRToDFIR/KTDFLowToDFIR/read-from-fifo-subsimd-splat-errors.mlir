@@ -36,7 +36,7 @@ module {
       %reg = memref.alloc() : memref<1x4xf16, "SFU_REG">
       // expected-error @below {{sub-SIMD group width 8 does not divide the 4 lanes received}}
       %read = ktdf.read_from_fifo %fifo
-        {splat = #ktdf.splat<first_subsimd_lane_to_all_subsimd_lanes>}
+        {splat = #ktdf.splat<first_subsimd_lane_to_each_subsimd>}
         : !ktdf.fifo.slot<"L1LU" -> "SFU", 4xf16> -> memref<1x4xf16>
       memref.copy %read, %reg : memref<1x4xf16> to memref<1x4xf16, "SFU_REG">
     }
