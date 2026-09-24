@@ -42,8 +42,7 @@
 #include "dataflow-scheduler/Dialect/KTDFArch/Transforms/ApplyPatterns.h"
 #include "dataflow-scheduler/Dialect/VectorChain/VectorChain.h"  // IWYU pragma: keep
 #include "dataflow-scheduler/Transforms/Passes.h"
-#include "ktir/Dialect/KTDP/KTDPDialect.h"        // IWYU pragma: keep
-#include "ktir/Dialect/SpyreOp/SpyreOpDialect.h"  // IWYU pragma: keep
+#include "ktir/Dialect/KTDP/KTDPDialect.h"  // IWYU pragma: keep
 
 #define PASS_NAME "apply-device-patterns"
 #define DEBUG_TYPE PASS_NAME
@@ -253,7 +252,7 @@ auto ktdfMemRefReadFromFifo(mlir::PatternRewriter& rewriter,
     return mlir::failure();
   }
 
-  results.push_back(mlir::ktdf::tensorReadFromFifoToMemref(rewriter, read));
+  results.push_back(mlir::ktdf::convertFromTensorToMemref(rewriter, read));
   return mlir::success();
 }
 

@@ -1,10 +1,7 @@
-// RUN: dataflow-scheduler-opt --splat-annotation %s | FileCheck %s
+// RUN: dataflow-scheduler-opt --splat-legalization %s | FileCheck %s
 
-// Verify that SplatAnnotationPass widens a splat load to the arch's access
+// Verify that SplatLegalizationPass legalizes a splat load to the arch's access
 // granularity and marks the reads a sub-SIMD splat still has to finish.
-//
-// The LXLU / SFP naming used in production is mapped to the sample_device
-// equivalents L1LU / SFU so this test is self-contained.
 //
 // === f32 case ===
 // L1LU word_size=1 byte, access_granularity for "L1": [64, 8, 2] words.
@@ -37,7 +34,7 @@ ktdf_arch.device @sample_device attributes {mem_space_mapping = #ktdf_arch.map<"
 // CHECK:       %[[R0:.*]] = ktdf.read_from_fifo %{{.*}}#0
 // CHECK-SAME:    -> tensor<1x1x32xf32>
 // CHECK:       %[[R1:.*]] = ktdf.read_from_fifo %{{.*}}#1
-// CHECK-SAME:    {splat = #ktdf.splat<first_subsimd_lane_to_all_subsimd_lanes>}
+// CHECK-SAME:    {splat = #ktdf.splat<first_subsimd_lane_to_each_subsimd>}
 // CHECK-SAME:    -> tensor<1x1x32xf32>
 
 // The generic is untouched: still tensors, still the map legalization left.

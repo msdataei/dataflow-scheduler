@@ -54,7 +54,7 @@ module {
     ktdf_lowering.execute_on %u_sfu {
       %reg = memref.alloc() : memref<1x64xf16, "SFU_REG">
       %read = ktdf.read_from_fifo %fifo
-        {splat = #ktdf.splat<first_subsimd_lane_to_all_subsimd_lanes>}
+        {splat = #ktdf.splat<first_subsimd_lane_to_each_subsimd>}
         : !ktdf.fifo.slot<"L1LU" -> "SFU", 64xf16> -> memref<1x64xf16>
       memref.copy %read, %reg : memref<1x64xf16> to memref<1x64xf16, "SFU_REG">
     }
