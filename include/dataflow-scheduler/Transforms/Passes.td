@@ -392,7 +392,7 @@ def SplatLegalizationPass : Pass<"splat-legalization", "mlir::ModuleOp"> {
   ];
 }
 
-def CustomSchedulerBufferizationPass : Pass<"custom-scheduler-bufferization", "mlir::ModuleOp"> {
+def CustomLinalgBufferizationPass : Pass<"custom-linalg-bufferization", "mlir::ModuleOp"> {
   let summary = "Absorb bufferization.to_tensor into its buffer-mode consumer";
   let description = [{
     Rebuilds every `linalg.generic` that reads a `bufferization.to_tensor` so it
@@ -425,7 +425,7 @@ def CustomSchedulerBufferizationPass : Pass<"custom-scheduler-bufferization", "m
     The pass is not specific to splats: any `to_tensor` whose uses can be
     converted is absorbed.
   }];
-  let constructor = "::scheduler::createCustomSchedulerBufferizationPass()";
+  let constructor = "::scheduler::createCustomLinalgBufferizationPass()";
 
   let dependentDialects = [
     "mlir::bufferization::BufferizationDialect",

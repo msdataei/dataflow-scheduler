@@ -133,7 +133,7 @@ void scheduler::buildSchedulerOptimizationPipeline(
   // A pattern above can only hand a buffer it materialized to a tensor-typed
   // consumer as a tensor, so the consumer is rebuilt on buffers here, before
   // addresses are assigned to the buffers themselves.
-  pm.addPass(createCustomSchedulerBufferizationPass());
+  pm.addPass(createCustomLinalgBufferizationPass());
 
   pm.addPass(createAddressAssignmentPass(scheduler_ctx));
   // TODO: position of cross-instance parallelization is TBD

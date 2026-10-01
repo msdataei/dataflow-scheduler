@@ -74,7 +74,7 @@
 // CHECK-NEXT:   apply-device-patterns{groups={post_scheduling}}
 // CHECK-NEXT:   )
 // CHECK-NEXT:   )
-// CHECK-NEXT:   custom-scheduler-bufferization
+// CHECK-NEXT:   custom-linalg-bufferization
 // CHECK-NEXT:   address-assignment
 // CHECK-NEXT:   normalize-grid-to-1d
 // CHECK-NEXT:   ktdf-to-ktdflowering

@@ -59,8 +59,8 @@
   ktdf_arch.features = {
     ktdf_arch.feature.compute,
     ktdf_arch.feature.simd = {
-      lanes = #ktdf_arch.map<f16 = 64, f32 = 64, i32 = 64>,
-      sub_simd_lanes = #ktdf_arch.map<f16 = 8, f32 = 8, i32 = 8>,
+      lanes = #ktdf_arch.map<f16 = 64, f32 = 32, i32 = 32>,
+      sub_simd_lanes = #ktdf_arch.map<f16 = 8, f32 = 4, i32 = 4>,
       shuffle_modes = { FirstSubSimdLaneToEachSubSimd }
     }
   }

@@ -1,6 +1,6 @@
-// RUN: dataflow-scheduler-opt --custom-scheduler-bufferization %s | FileCheck %s
+// RUN: dataflow-scheduler-opt --custom-linalg-bufferization %s | FileCheck %s
 
-// Verify that CustomSchedulerBufferizationPass rebuilds the linalg.generic
+// Verify that CustomLinalgBufferizationPass rebuilds the linalg.generic
 // reading a bufferization.to_tensor so it runs on buffers, and drops the tensor
 // view.
 //

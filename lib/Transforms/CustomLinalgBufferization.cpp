@@ -16,7 +16,7 @@
 //
 //===----------------------------------------------------------------------===//
 //
-// CustomSchedulerBufferization: rebuild a linalg.generic that reads a
+// CustomLinalgBufferization: rebuild a linalg.generic that reads a
 // bufferization.to_tensor so it operates on buffers, and drop the to_tensor.
 //
 // A device pattern that materializes a buffer has to hand it back as a tensor,
@@ -48,7 +48,7 @@
 #include "mlir/IR/BuiltinTypes.h"
 #include "mlir/Pass/Pass.h"
 
-#define PASS_NAME "custom-scheduler-bufferization"
+#define PASS_NAME "custom-linalg-bufferization"
 #define DEBUG_TYPE PASS_NAME
 
 static llvm::cl::opt<bool> DisableThisPass(
@@ -57,7 +57,7 @@ static llvm::cl::opt<bool> DisableThisPass(
     llvm::cl::init(false));
 
 namespace scheduler {
-#define GEN_PASS_DEF_CUSTOMSCHEDULERBUFFERIZATIONPASS
+#define GEN_PASS_DEF_CUSTOMLINALGBUFFERIZATIONPASS
 #include "dataflow-scheduler/Transforms/Passes.h.inc"
 }  // namespace scheduler
 
@@ -160,9 +160,9 @@ static mlir::LogicalResult absorbIntoConsumer(
   return mlir::success();
 }
 
-struct CustomSchedulerBufferizationPass
-    : public scheduler::impl::CustomSchedulerBufferizationPassBase<
-          CustomSchedulerBufferizationPass> {
+struct CustomLinalgBufferizationPass
+    : public scheduler::impl::CustomLinalgBufferizationPassBase<
+          CustomLinalgBufferizationPass> {
   void runOnOperation() override {
     if (DisableThisPass) return;
     LDBG(1) << "========= " PASS_NAME " =========";
@@ -196,7 +196,6 @@ struct CustomSchedulerBufferizationPass
 
 }  // namespace
 
-std::unique_ptr<mlir::Pass>
-scheduler::createCustomSchedulerBufferizationPass() {
-  return std::make_unique<CustomSchedulerBufferizationPass>();
+std::unique_ptr<mlir::Pass> scheduler::createCustomLinalgBufferizationPass() {
+  return std::make_unique<CustomLinalgBufferizationPass>();
 }
