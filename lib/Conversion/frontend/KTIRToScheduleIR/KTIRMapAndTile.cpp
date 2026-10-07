@@ -510,6 +510,25 @@ struct TileStore : mlir::OpRewritePattern<mlir::ktdp::StoreOp> {
   const AttrMapping& mem_space_map_;
 };
 
+/// The linalg.fill that @p iter_arg starts from, or null: the value the loops
+/// it is carried through are initialized with, traced out of the loop nest.
+[[nodiscard]] auto getFillInitializer(mlir::BlockArgument iter_arg)
+    -> mlir::linalg::FillOp {
+  mlir::Value value = iter_arg;
+  while (auto arg = llvm::dyn_cast<mlir::BlockArgument>(value)) {
+    auto loop = llvm::dyn_cast<mlir::scf::ForOp>(arg.getOwner()->getParentOp());
+    if (!loop) {
+      return nullptr;
+    }
+    auto* const init = loop.getTiedLoopInit(arg);
+    if (init == nullptr) {
+      return nullptr;
+    }
+    value = init->get();
+  }
+  return value.getDefiningOp<mlir::linalg::FillOp>();
+}
+
 void breakLoopCarriedDependencies(mlir::RewriterBase& rewriter,
                                   mlir::DestinationStyleOpInterface op) {
   rewriter.setInsertionPoint(op);
@@ -521,9 +540,23 @@ void breakLoopCarriedDependencies(mlir::RewriterBase& rewriter,
 
     // FIMXE: This only works because we aren't tiling reduction dimensions!
 
-    rewriter.replaceOp(slice, mlir::tensor::EmptyOp::create(
-                                  rewriter, op.getLoc(), slice.getMixedSizes(),
-                                  slice.getType().getElementType()));
+    mlir::Value tile = mlir::tensor::EmptyOp::create(
+        rewriter, op.getLoc(), slice.getMixedSizes(),
+        slice.getType().getElementType());
+
+    // A linalg.fill initializer is the value the accumulator starts from, so
+    // it is rebuilt on the tile. The original becomes dead with the loops'
+    // iter_args.
+    if (auto fill = getFillInitializer(
+            llvm::cast<mlir::BlockArgument>(slice.getSource()));
+        fill) {
+      tile = mlir::linalg::FillOp::create(rewriter, fill.getLoc(),
+                                          mlir::ValueRange{fill.value()},
+                                          mlir::ValueRange{tile})
+                 .getResult(0);
+    }
+
+    rewriter.replaceOp(slice, tile);
   }
 }
 
