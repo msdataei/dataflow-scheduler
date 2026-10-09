@@ -1,10 +1,20 @@
-// RUN: dataflow-scheduler-opt -pass-pipeline='builtin.module(builtin.module(func.func(ktir-map-and-tile)))' %s
+// RUN: dataflow-scheduler-opt -pass-pipeline='builtin.module(builtin.module(func.func(ktir-map-and-tile)))' %s | FileCheck %s
 
 // A reduction initialised by a linalg.fill of a scalar loaded from local
-// memory is not supported yet: the one-element load's use is a
-// tensor.extract, not the tensor.extract_slice tiling leaves, and lowering it
-// fails with "no `tensor.extract_slice` sink".
-// XFAIL: *
+// memory: the fill is not tiled, so it stays outside the tile loops together
+// with the one-element load it reads, and every tile slices the fill.
+
+// CHECK-LABEL: func.func @local_schedule_0()
+// CHECK:         %[[SCALAR:.*]] = ktdp.load %{{.*}} : <1x1xindex> -> tensor<1x1xf32>
+// CHECK-NEXT:    %[[VALUE:.*]] = tensor.extract %[[SCALAR]][%{{.*}}, %{{.*}}] : tensor<1x1xf32>
+// CHECK-NEXT:    %[[EMPTY:.*]] = tensor.empty() : tensor<256x32xf32>
+// CHECK-NEXT:    %[[FILL:.*]] = linalg.fill ins(%[[VALUE]] : f32) outs(%[[EMPTY]] : tensor<256x32xf32>) -> tensor<256x32xf32>
+// CHECK:         scf.for %[[IV0:.*]] = %{{.*}} to %{{.*}} step %{{.*}} {
+// CHECK-NEXT:      scf.for %[[IV1:.*]] = %{{.*}} to %{{.*}} step %{{.*}} {
+// CHECK-NEXT:        %[[LOAD:.*]] = ktdp_lowering.load {{.*}} -> tensor<2x1x32xf32>
+// CHECK-NEXT:        %[[SLICE:.*]] = tensor.extract_slice %[[FILL]][%[[IV0]], %[[IV1]]] [1, 32] [1, 1] : tensor<256x32xf32> to tensor<1x32xf32>
+// CHECK-NEXT:        linalg.generic
+// CHECK-SAME:          ins(%[[LOAD]] : tensor<2x1x32xf32>) outs(%[[SLICE]] : tensor<1x32xf32>)
 
 #map = affine_map<(d0, d1, d2) -> (d0, d1, d2)>
 #map1 = affine_map<(d0, d1) -> (d0, d1)>

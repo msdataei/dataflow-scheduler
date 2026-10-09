@@ -685,7 +685,12 @@ void KTIRMapAndTilePass::runOnOperation() {
   mlir::func::FuncOp func = getOperation();
   mlir::IRRewriter rewriter(func);
 
-  auto computes = llvm::to_vector(func.getOps<mlir::linalg::LinalgOp>());
+  // A `linalg.fill` is the initializer of a compute op's accumulator, which
+  // `detachLoopCarriedInits` slices; it is not a compute op of its own.
+  auto computes = llvm::to_vector(llvm::make_filter_range(
+      func.getOps<mlir::linalg::LinalgOp>(), [](mlir::linalg::LinalgOp op) {
+        return !llvm::isa<mlir::linalg::FillOp>(op);
+      }));
   if (computes.empty()) {
     return;
   }
