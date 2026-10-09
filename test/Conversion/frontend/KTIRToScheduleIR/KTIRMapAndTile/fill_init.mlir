@@ -1,21 +1,19 @@
 // RUN: dataflow-scheduler-opt --ktir-map-and-tile %s | FileCheck %s
 
 // A reduction whose accumulator is initialised by a linalg.fill keeps that
-// fill: tiling leaves the accumulator a slice of the loops' carried value, and
-// breaking that dependency rebuilds the fill on the tile, next to the
-// linalg.generic it initialises, instead of a bare tensor.empty. The original
-// fill is cleaned up.
+// fill outside the loops: tiling leaves the accumulator a slice of the loops'
+// carried value, and breaking that dependency slices the fill itself instead.
 
 // CHECK-LABEL: func.func @max_fill_init
 // CHECK:         %[[CST:.*]] = arith.constant 1.000000e+01 : f32
-// CHECK-NOT:     linalg.fill
-// CHECK:         scf.for
-// CHECK-NEXT:      scf.for
+// CHECK:         %[[EMPTY:.*]] = tensor.empty() : tensor<256x32xf32>
+// CHECK-NEXT:    %[[FILL:.*]] = linalg.fill ins(%[[CST]] : f32) outs(%[[EMPTY]] : tensor<256x32xf32>) -> tensor<256x32xf32>
+// CHECK:         scf.for %[[IV0:.*]] = %{{.*}} to %{{.*}} step %{{.*}} {
+// CHECK-NEXT:      scf.for %[[IV1:.*]] = %{{.*}} to %{{.*}} step %{{.*}} {
 // CHECK-NEXT:        %[[LOAD:.*]] = ktdp_lowering.load {{.*}} -> tensor<2x1x32xf32>
-// CHECK-NEXT:        %[[EMPTY:.*]] = tensor.empty() : tensor<1x32xf32>
-// CHECK-NEXT:        %[[FILL:.*]] = linalg.fill ins(%[[CST]] : f32) outs(%[[EMPTY]] : tensor<1x32xf32>) -> tensor<1x32xf32>
+// CHECK-NEXT:        %[[SLICE:.*]] = tensor.extract_slice %[[FILL]][%[[IV0]], %[[IV1]]] [1, 32] [1, 1] : tensor<256x32xf32> to tensor<1x32xf32>
 // CHECK-NEXT:        %[[RES:.*]] = linalg.generic
-// CHECK-SAME:          ins(%[[LOAD]] : tensor<2x1x32xf32>) outs(%[[FILL]] : tensor<1x32xf32>)
+// CHECK-SAME:          ins(%[[LOAD]] : tensor<2x1x32xf32>) outs(%[[SLICE]] : tensor<1x32xf32>)
 // CHECK:               arith.maximumf
 // CHECK:             ktdp_lowering.store %[[RES]]
 // CHECK-NOT:     linalg.fill

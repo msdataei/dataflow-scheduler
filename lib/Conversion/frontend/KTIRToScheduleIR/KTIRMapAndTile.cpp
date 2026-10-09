@@ -510,10 +510,10 @@ struct TileStore : mlir::OpRewritePattern<mlir::ktdp::StoreOp> {
   const AttrMapping& mem_space_map_;
 };
 
-/// The linalg.fill that @p iter_arg starts from, or null: the value the loops
-/// it is carried through are initialized with, traced out of the loop nest.
-[[nodiscard]] auto getFillInitializer(mlir::BlockArgument iter_arg)
-    -> mlir::linalg::FillOp {
+/// The value the loops @p iter_arg is carried through are initialized with,
+/// traced out of the loop nest, or null.
+[[nodiscard]] auto getLoopNestInit(mlir::BlockArgument iter_arg)
+    -> mlir::Value {
   mlir::Value value = iter_arg;
   while (auto arg = llvm::dyn_cast<mlir::BlockArgument>(value)) {
     auto loop = llvm::dyn_cast<mlir::scf::ForOp>(arg.getOwner()->getParentOp());
@@ -526,38 +526,51 @@ struct TileStore : mlir::OpRewritePattern<mlir::ktdp::StoreOp> {
     }
     value = init->get();
   }
-  return value.getDefiningOp<mlir::linalg::FillOp>();
+  return value;
 }
 
-void breakLoopCarriedDependencies(mlir::RewriterBase& rewriter,
-                                  mlir::DestinationStyleOpInterface op) {
+/// Detaches every init of @p op that is a slice of a loop-carried value from
+/// the loops' iter_args, so that they can be dropped. A `linalg.fill` init
+/// stays outside the loops and the slice is taken from it directly, while a
+/// `tensor.empty` init is replaced by a fresh tile; any other init carries data
+/// across iterations and is rejected.
+///
+/// FIXME: Starting every tile from the fill is only valid because we aren't
+///        tiling reduction dimensions!
+auto detachLoopCarriedInits(mlir::RewriterBase& rewriter,
+                            mlir::DestinationStyleOpInterface op)
+    -> llvm::LogicalResult {
   rewriter.setInsertionPoint(op);
   for (auto& outs : op.getDpsInitsMutable()) {
     auto slice = outs.get().getDefiningOp<mlir::tensor::ExtractSliceOp>();
-    if (!slice || !llvm::isa<mlir::BlockArgument>(slice.getSource())) {
+    if (!slice) {
+      continue;
+    }
+    auto iter_arg = llvm::dyn_cast<mlir::BlockArgument>(slice.getSource());
+    if (!iter_arg) {
       continue;
     }
 
-    // FIMXE: This only works because we aren't tiling reduction dimensions!
-
-    mlir::Value tile = mlir::tensor::EmptyOp::create(
-        rewriter, op.getLoc(), slice.getMixedSizes(),
-        slice.getType().getElementType());
-
-    // A linalg.fill initializer is the value the accumulator starts from, so
-    // it is rebuilt on the tile. The original becomes dead with the loops'
-    // iter_args.
-    if (auto fill = getFillInitializer(
-            llvm::cast<mlir::BlockArgument>(slice.getSource()));
-        fill) {
-      tile = mlir::linalg::FillOp::create(rewriter, fill.getLoc(),
-                                          mlir::ValueRange{fill.value()},
-                                          mlir::ValueRange{tile})
-                 .getResult(0);
+    const auto init = getLoopNestInit(iter_arg);
+    auto* const init_op = init ? init.getDefiningOp() : nullptr;
+    if (!llvm::isa_and_present<mlir::tensor::EmptyOp, mlir::linalg::FillOp>(
+            init_op)) {
+      return op->emitError(
+          "tiling error: loop-carried init is neither a `tensor.empty` nor a "
+          "`linalg.fill`");
     }
 
-    rewriter.replaceOp(slice, tile);
+    if (llvm::isa<mlir::linalg::FillOp>(init_op)) {
+      rewriter.modifyOpInPlace(
+          slice, [&]() { slice.getSourceMutable().assign(init); });
+      continue;
+    }
+
+    rewriter.replaceOp(slice, mlir::tensor::EmptyOp::create(
+                                  rewriter, op.getLoc(), slice.getMixedSizes(),
+                                  slice.getType().getElementType()));
   }
+  return llvm::success();
 }
 
 void bubbleOpExtractSlice(mlir::RewriterBase& rewriter,
@@ -709,9 +722,10 @@ void KTIRMapAndTilePass::runOnOperation() {
     }
 
     loop_nests.emplace_back(std::move(*maybe_loops));
-    // Break the loop carried `tensor.extract_slice` dependencies.
-    // FIXME: This is illegal if we're ever tiling across a reduction dimension.
-    breakLoopCarriedDependencies(rewriter, op);
+    if (failed(detachLoopCarriedInits(rewriter, op))) {
+      signalPassFailure();
+      return;
+    }
   }
 
   // Merge `tensor.(insert|extract)_slice` ops and tile `ktdp.(load|store)` and
