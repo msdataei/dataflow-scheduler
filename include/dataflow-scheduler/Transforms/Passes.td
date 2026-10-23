@@ -693,8 +693,9 @@ def OrderFifoSlotsByUsePass
     : Pass<"order-fifo-slots-by-use", "mlir::ModuleOp"> {
   let summary = "Write and read the slots of a FIFO in the order they are used";
   let description = [{
-    The slots one stage writes and another reads between the same pair of ends
-    share one physical FIFO, which delivers in the order it was filled. The
+    The slots between the same pair of ends share one physical FIFO, whichever
+    allocation and pipeline of the function they come from, and it delivers in
+    the order it was filled. The
     lowering below makes each read a receive the consumer takes the value from
     at the op using it, so the slots have to be written in the order the
     consumer uses them, not merely read in the order they are written.
@@ -704,10 +705,23 @@ def OrderFifoSlotsByUsePass
     the position of the consuming op in the stage, then, for a linalg.generic,
     the position in its body of the first op using the operand.
 
-    A group is left alone when a slot is not written and read exactly once, a
-    value is used outside the consumer's block, or a write would have to move
-    above the definition of one of its operands or above an op between the
-    writes that touches memory.
+    Reordering a FIFO changes the order it delivers in, so it is done only when
+    that order is known: one block writes all of its slots, another block in a
+    different stage reads all of them, and no other op of the function takes a
+    slot of the FIFO. Each write and read then runs once per run of its block,
+    so the FIFO carries the order of the writes over and over, and applying one
+    permutation to the writes and the reads keeps both ends in step. A pipeline
+    is a DAG of stages, so neither stage is on a cycle.
+
+    A FIFO is left alone when:
+    - a slot is not written and read exactly once;
+    - its slots are written or read in more than one block, or written and
+      read in the same stage;
+    - another op of the function takes a slot between the same ends, e.g. in
+      another stage, branch of the stage DAG, or nested pipeline;
+    - a value is used outside the consumer's block;
+    - a write would have to move above the definition of one of its operands,
+      or above an op between the writes that touches memory.
 
     Example, where the consumer copies %b into a register before it adds %a:
     ```mlir
@@ -734,6 +748,9 @@ def OrderFifoSlotsByUsePass
   let statistics = [
     Statistic<"num_reordered", "num-reordered",
               "Number of FIFOs whose slots were reordered">,
+    Statistic<"num_skipped", "num-skipped",
+              "Number of FIFOs left unchanged as the order they deliver in "
+              "can't be told">,
   ];
 }
 

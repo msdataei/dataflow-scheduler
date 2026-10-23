@@ -21,15 +21,17 @@
 #include <llvm/ADT/SmallPtrSet.h>
 #include <llvm/ADT/SmallVector.h>
 #include <llvm/Support/DebugLog.h>
+#include <llvm/Support/ErrorHandling.h>
+#include <mlir/Dialect/Func/IR/FuncOps.h>
 #include <mlir/Dialect/Linalg/IR/Linalg.h>
 #include <mlir/IR/Dominance.h>
 #include <mlir/Interfaces/SideEffectInterfaces.h>
 
 #include <cassert>
 #include <optional>
-#include <tuple>
 #include <utility>
 
+#include "dataflow-scheduler/Dialect/KTDF/Analysis/StageGraph.h"
 #include "dataflow-scheduler/Dialect/KTDF/KTDF.h"
 #include "dataflow-scheduler/Transforms/Passes.h"  // IWYU pragma: keep
 
@@ -179,6 +181,35 @@ struct SlotAccess {
   return true;
 }
 
+/// The pair of ends that names one physical FIFO.
+using Ends = std::pair<mlir::Attribute, mlir::Attribute>;
+
+/// The ops that take a slot of each FIFO.
+using ChannelAccesses =
+    llvm::DenseMap<Ends, llvm::SmallPtrSet<mlir::Operation*, 8>>;
+
+/// Collects, for each FIFO, every op in @p func that takes one of its slots.
+///
+/// A FIFO is named by its ends alone: the slots of all pipelines in @p func
+/// between the same ends go through it, whichever allocation they come from.
+[[nodiscard]] auto collectChannelAccesses(mlir::func::FuncOp func)
+    -> ChannelAccesses {
+  ChannelAccesses channels;
+  func.walk([&](mlir::Operation* op) {
+    // Yielding a slot out of the private only defines it.
+    if (llvm::isa<mlir::ktdf::PrivateYieldOp>(op)) {
+      return;
+    }
+    for (auto operand : op->getOperands()) {
+      if (auto type =
+              llvm::dyn_cast<mlir::ktdf::FifoSlotType>(operand.getType())) {
+        channels[{type.getSrc(), type.getDest()}].insert(op);
+      }
+    }
+  });
+  return channels;
+}
+
 struct OrderFifoSlotsByUsePass
     : impl::OrderFifoSlotsByUsePassBase<OrderFifoSlotsByUsePass> {
   using OrderFifoSlotsByUsePassBase::OrderFifoSlotsByUsePassBase;
@@ -188,48 +219,117 @@ struct OrderFifoSlotsByUsePass
       return;
     }
 
-    getOperation()->walk([&](mlir::ktdf::PipelineOp pipeline) {
-      auto private_op = pipeline.getPrivateOp();
-      if (!private_op) {
-        return;
-      }
-      mlir::DominanceInfo dominance(pipeline);
-
-      // The slots of one FIFO, i.e. one pair of ends, written in one block and
-      // read in another, in the order they are written.
-      using Key = std::tuple<mlir::Attribute, mlir::Attribute, mlir::Block*,
-                             mlir::Block*>;
-      llvm::DenseMap<Key, unsigned> fifo_index;
-      llvm::SmallVector<llvm::SmallVector<SlotAccess>> fifos;
-      for (auto slot : private_op->getResults()) {
-        auto type = llvm::dyn_cast<mlir::ktdf::FifoSlotType>(slot.getType());
-        if (!type) {
-          continue;
-        }
-        auto access = getSlotAccess(slot);
-        if (!access) {
-          continue;
-        }
-        const Key key{type.getSrc(), type.getDest(), access->writer->getBlock(),
-                      access->reader->getBlock()};
-        auto [it, inserted] = fifo_index.try_emplace(key, fifos.size());
-        if (inserted) {
-          fifos.emplace_back();
-        }
-        fifos[it->second].push_back(*access);
-      }
-
-      for (auto& accesses : fifos) {
-        if (accesses.size() < 2) {
-          continue;
-        }
-        orderFifo(accesses, dominance);
-      }
+    getOperation()->walk([&](mlir::func::FuncOp func) {
+      const auto channels = collectChannelAccesses(func);
+      func.walk([&](mlir::ktdf::PipelineOp pipeline) {
+        orderPipeline(pipeline, channels);
+      });
     });
   }
 
  private:
-  void orderFifo(llvm::SmallVector<SlotAccess>& accesses,
+  void orderPipeline(mlir::ktdf::PipelineOp pipeline,
+                     const ChannelAccesses& channels) {
+    auto private_op = pipeline.getPrivateOp();
+    if (!private_op) {
+      return;
+    }
+    mlir::DominanceInfo dominance(pipeline);
+
+    // The slots of each FIFO, i.e. each pair of ends, in the order they are
+    // written.
+    llvm::DenseMap<Ends, unsigned> fifo_index;
+    llvm::SmallVector<std::pair<Ends, llvm::SmallVector<SlotAccess>>> fifos;
+    for (auto slot : private_op->getResults()) {
+      auto type = llvm::dyn_cast<mlir::ktdf::FifoSlotType>(slot.getType());
+      if (!type) {
+        continue;
+      }
+      auto access = getSlotAccess(slot);
+      if (!access) {
+        continue;
+      }
+      const Ends ends{type.getSrc(), type.getDest()};
+      auto [it, inserted] = fifo_index.try_emplace(ends, fifos.size());
+      if (inserted) {
+        fifos.emplace_back(ends, llvm::SmallVector<SlotAccess>{});
+      }
+      fifos[it->second].second.push_back(*access);
+    }
+
+    for (auto& [ends, accesses] : fifos) {
+      if (accesses.size() < 2) {
+        continue;
+      }
+      if (!hasKnownProtocol(accesses, channels.lookup(ends))) {
+        ++num_skipped;
+        continue;
+      }
+      orderFifo(accesses, dominance);
+    }
+  }
+
+  /// Determines whether the FIFO the slots of @p accesses go through delivers
+  /// them in an order this pass can tell, given @p channel , every op of the
+  /// function accessing the FIFO.
+  ///
+  /// That holds when one block writes all of them, another reads all of them,
+  /// and no op other than those touches the FIFO. Each write and read is then
+  /// run once per run of its block, so the FIFO carries the order of the writes
+  /// over and over, and the consumer takes them in the order of the reads.
+  /// Applying one permutation to both keeps them in step.
+  [[nodiscard]] static auto hasKnownProtocol(
+      llvm::ArrayRef<SlotAccess> accesses,
+      const llvm::SmallPtrSet<mlir::Operation*, 8>& channel) -> bool {
+    auto* writer_block = accesses.front().writer->getBlock();
+    auto* reader_block = accesses.front().reader->getBlock();
+    llvm::SmallPtrSet<mlir::Operation*, 8> own;
+    for (const auto& access : accesses) {
+      if (access.writer->getBlock() != writer_block ||
+          access.reader->getBlock() != reader_block) {
+        LDBG() << "slots written or read in more than one block, not ordered: "
+               << access.slot;
+        return false;
+      }
+      own.insert(access.writer);
+      own.insert(access.reader);
+    }
+
+    // Each op of `own` takes a slot of the FIFO, so it is one of `channel`.
+    if (own.size() != channel.size()) {
+      LDBG() << "FIFO accessed by other ops too, not ordered: "
+             << accesses.front().slot;
+      return false;
+    }
+
+    auto writer_stage =
+        accesses.front().writer->getParentOfType<mlir::ktdf::StageOp>();
+    auto reader_stage =
+        accesses.front().reader->getParentOfType<mlir::ktdf::StageOp>();
+    assert(writer_stage && reader_stage && "a slot is accessed in a stage");
+    // A pipeline is a DAG of stages, so the order in which its stages run puts
+    // no access of the FIFO on a cycle.
+    if (isOnCycle(writer_stage) || isOnCycle(reader_stage)) {
+      llvm_unreachable("a pipeline is a DAG of stages");
+    }
+    if (writer_stage == reader_stage) {
+      LDBG() << "slots written and read in the same stage, not ordered: "
+             << accesses.front().slot;
+      return false;
+    }
+    return true;
+  }
+
+  /// Determines whether @p stage (transitively) depends on itself.
+  [[nodiscard]] static auto isOnCycle(mlir::ktdf::StageOp stage) -> bool {
+    return llvm::any_of(
+        mlir::ktdf::StageGraph::Node(stage).getProducers(),
+        [&](mlir::ktdf::StageOp producer) {
+          return mlir::ktdf::StageGraph::Node(producer).dependsOn(stage);
+        });
+  }
+
+  void orderFifo(llvm::ArrayRef<SlotAccess> accesses,
                  mlir::DominanceInfo& dominance) {
     auto* reader_block = accesses.front().reader->getBlock();
     llvm::DenseMap<mlir::Operation*, unsigned> positions;
@@ -276,7 +376,8 @@ struct OrderFifoSlotsByUsePass
     // The writes go first, as they are the side that can fail, which leaves
     // both sides as they were. A read only takes its slot, which is defined
     // above the stages, and moving it up does not change where its value is
-    // consumed, so the reads always move.
+    // consumed. No other op takes from the FIFO (see hasKnownProtocol), so
+    // the reads always move.
     if (!in_order(writer) &&
         !moveIntoOrder(writers, dominance, /*keep_memory_order=*/true)) {
       LDBG() << "unable to reorder the writes of " << *writers.front();
