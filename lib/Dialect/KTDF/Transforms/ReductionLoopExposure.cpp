@@ -43,7 +43,8 @@
 //          scf.for %r1 = 0 to dim_sizes[1] step 1
 //            ...
 //   8. For the compute stage specifically:
-//      - tensor.empty is emitted before the outermost loop (accumulator init).
+//      - the accumulator init (explicit arith.constant, else tensor.empty) is
+//        emitted before the outermost loop.
 //      - Each loop level carries the accumulator as iter_args; the value
 //        threads down to the innermost loop where linalg.generic runs.
 //      - When the generic writes to a FIFO directly, write_to_fifo is wrapped
@@ -70,8 +71,11 @@
 #include "dataflow-scheduler/Dialect/KTDF/Utils/Utils.h"
 #include "llvm/ADT/DenseSet.h"
 #include "llvm/Support/DebugLog.h"
+#include "mlir/Dialect/Affine/IR/AffineOps.h"
 #include "mlir/Dialect/Arith/IR/Arith.h"
+#include "mlir/Dialect/Arith/Utils/Utils.h"
 #include "mlir/Dialect/Linalg/IR/Linalg.h"
+#include "mlir/Dialect/Linalg/Transforms/Transforms.h"
 #include "mlir/Dialect/SCF/IR/SCF.h"
 #include "mlir/Dialect/Tensor/IR/Tensor.h"
 #include "mlir/IR/AffineMap.h"
@@ -118,10 +122,19 @@ static bool isReductionInitSeed(Value init) {
 // ---------------------------------------------------------------------------
 struct ReductionInfo {
   SmallVector<int64_t> reduction_dims;  // indices into iterator-type list
-  SmallVector<int64_t> input_dims;  // dim of the first input each one indexes
+  SmallVector<int64_t> input_dims;  // dim of the data operand each one indexes
   SmallVector<int64_t> dim_sizes;   // size of each reduction dimension
   int64_t reduction_size = 1;       // product of dim_sizes
+
+  // Output-only reduction dims: reduction dims NOT present in the FIFO data
+  // operand (e.g. the k-slot axis in a top-k kernel).  These are exposed as
+  // inner scf.for loops inside the compute stage rather than FIFO-driven loops.
+  SmallVector<int64_t> output_only_reduction_dims;
+  SmallVector<int64_t> output_only_dim_sizes;
 };
+
+using ktdf::findFifoInOperandIdx;
+using ktdf::getFifoInOperand;
 
 // ---------------------------------------------------------------------------
 // Fill `info` with the reduction dimensions and sizes derived from
@@ -129,15 +142,17 @@ struct ReductionInfo {
 // that it is left for later handling by the ktdf.opaque wrapping pass.
 //
 // Sizes are loop ranges, and each reduction dim is recorded with the dim of
-// the first input it indexes: loop dims and input dims only coincide under an
-// identity indexing map.
+// the FIFO data operand it indexes: loop dims and data dims only coincide
+// under an identity indexing map.  A reduction dim the data operand does not
+// index (e.g. a top-k slot axis only present on the outs) is output-only.
 //
 // Returns true on success.  Returns false (and emits a debug message) when:
-//   - there are no outer-dim reduction dimensions to expose, or
+//   - the generic has no FIFO data operand,
+//   - there are no reduction dimensions to expose, or
 //   - any qualifying reduction dimension has a dynamic size.
 // Fails (and emits an error) when the reduction has more than one input, or
-// when the first input cannot be sliced along the reduction dims: its map is
-// not a projected permutation, or a reduction dim to expose does not index it.
+// when the data operand cannot be sliced along the reduction dims: its map is
+// not a projected permutation.
 // ---------------------------------------------------------------------------
 static FailureOr<bool> collectReductionInfo(linalg::GenericOp generic_op,
                                             ReductionInfo& info) {
@@ -150,10 +165,15 @@ static FailureOr<bool> collectReductionInfo(linalg::GenericOp generic_op,
 
   std::optional<unsigned> inner_dim = ktdf::findInnerDimLoopDim(generic_op);
 
+  std::optional<unsigned> data_idx = findFifoInOperandIdx(generic_op);
+  if (!data_idx) {
+    LDBG(1) << PASS_NAME ": no FIFO data operand — skipping";
+    return false;
+  }
+
   // Collect reduction dims to expose as loops, excluding only the inner
   // dim (loop dim at input axis input_rank-1).  Size-1 dims are skipped.
-  AffineMap input_map =
-      generic_op.getMatchingIndexingMap(generic_op.getDpsInputOperand(0));
+  AffineMap data_map = generic_op.getIndexingMapsArray()[*data_idx];
   const auto loop_ranges = generic_op.getStaticLoopRanges();
 
   auto iter_types = generic_op.getIteratorTypesArray();
@@ -171,18 +191,23 @@ static FailureOr<bool> collectReductionInfo(linalg::GenericOp generic_op,
     }
     if (dim_sz == 1) continue;
 
-    // The loop below slices the first input, along the dim this one indexes.
-    if (!input_map.isProjectedPermutation())
+    // The loop below slices the data operand, along the dim this one indexes.
+    if (!data_map.isProjectedPermutation())
       return generic_op.emitError(PASS_NAME)
              << ": the first input is not indexed by a projected permutation, "
                 "so it cannot be sliced along reduction dim "
              << i;
-    auto input_dim = input_map.getResultPosition(
+    auto input_dim = data_map.getResultPosition(
         getAffineDimExpr(static_cast<unsigned>(i), generic_op.getContext()));
-    if (!input_dim)
-      return generic_op.emitError(PASS_NAME)
-             << ": reduction dim " << i
-             << " does not index the first input, so it cannot be exposed";
+    if (!input_dim) {
+      // Output-only reduction dim (e.g. top-k k-slot axis): expose as an inner
+      // loop in the compute stage, not a FIFO-driven outer loop.
+      LDBG(1) << PASS_NAME ": output-only reduction dim " << i
+              << " (size=" << dim_sz << ") — will expose as inner k-loop";
+      info.output_only_reduction_dims.push_back(i);
+      info.output_only_dim_sizes.push_back(dim_sz);
+      continue;
+    }
 
     info.reduction_dims.push_back(i);
     info.input_dims.push_back(*input_dim);
@@ -190,19 +215,25 @@ static FailureOr<bool> collectReductionInfo(linalg::GenericOp generic_op,
     info.reduction_size *= dim_sz;
   }
 
-  if (info.reduction_dims.empty()) {
-    LDBG(1) << PASS_NAME ": no outer-dim reduction dims to expose — skipping";
+  if (info.reduction_dims.empty() && info.output_only_reduction_dims.empty()) {
+    LDBG(1) << PASS_NAME ": no reduction dims to expose — skipping";
     return false;
   }
 
   // The rewrite can slice a single input. With more inputs the others would
   // stay whole while the reduction reads them slice by slice, so the pass
   // rejects the reduction instead of transforming it.
-  if (generic_op.getNumDpsInputs() != 1)
+  if (!info.reduction_dims.empty() && generic_op.getNumDpsInputs() > 1)
     return generic_op.emitError(PASS_NAME)
            << ": a reduction with " << generic_op.getNumDpsInputs()
            << " inputs is not supported; the pass can slice only a single "
               "input";
+
+  // A generic with only output-only dims but no FIFO-driven dims still needs
+  // FIFO infrastructure to be present (the pass gates on findFifoInOperandIdx).
+  // If there are no FIFO-driven dims the existing rewrite would try to shrink
+  // the FIFO by reduction_size=1, which is a no-op, but we still need the
+  // output-only loop to be emitted.  Allow that path through.
 
   LDBG(1) << PASS_NAME ": reduction_dims=[";
   for (size_t i = 0; i < info.reduction_dims.size(); ++i) {
@@ -234,7 +265,8 @@ static LogicalResult collectReductionGenericOps(
         if (auto generic = dyn_cast<linalg::GenericOp>(op)) {
           // Skip chained generics whose input comes from another generic —
           // those are inner-dim ops left for a later pass.
-          if (generic.getInputs().front().getDefiningOp<linalg::GenericOp>())
+          if (!generic.getInputs().empty() &&
+              generic.getInputs().front().getDefiningOp<linalg::GenericOp>())
             return WalkResult::advance();
           ReductionInfo info;
           FailureOr<bool> exposable = collectReductionInfo(generic, info);
