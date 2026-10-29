@@ -96,10 +96,10 @@ class Allocator : public mlir::ktdf::PipelineBuilder::Allocator {
       auto old_alloc = std::exchange(
           alloc, mlir::ktdf::FifoAllocateOp::create(rewriter, producer.getLoc(),
                                                     slot_types, {}));
-      rewriter.replaceOp(old_alloc, alloc->getResults().drop_front());
+      rewriter.replaceOp(old_alloc, alloc->getResults().drop_back());
     }
 
-    return mlir::cast<mlir::ktdf::FifoSlot>(alloc.getResults().front());
+    return mlir::cast<mlir::ktdf::FifoSlot>(alloc.getResults().back());
   }
 
  private:
@@ -513,9 +513,7 @@ auto KTIRPipelinePass::createPipeline(mlir::RewriterBase& rewriter,
                  ? mlir::ktdf::PipelineBuilder::Placement(stage)
                  : place(builder, op);
     };
-    // Ops are inserted at the beginning of the stage, so insert the fills in
-    // reverse to keep their order.
-    for (auto* const fill : llvm::reverse(fills)) {
+    for (auto* const fill : fills) {
       LDBG() << "inserting fill " << *fill;
       builder.insert({fill}, place_fill, dominance);
     }
