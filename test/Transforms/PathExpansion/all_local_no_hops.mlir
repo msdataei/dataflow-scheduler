@@ -2,9 +2,9 @@
 
 // Both inputs and the output of an add live in local memory, so every flow
 // (L1 -> L1LU -> SFU and SFU -> L1SU -> L1) is already legal and no hop stage
-// is needed. Path expansion must still give the load and store stages their
-// load/store unit, and retype the FIFOs from the memory-level placeholders
-// ("L1" -> "SFU", "SFU" -> "L1") to the units that run each end.
+// is needed. Path expansion will still rewrite the pipeline to generate stages
+// with correct units attribute. Also, we rewrite the fifos to the units that
+// run each end, i.e. from L1 to L1LU or L1SU
 
 // CHECK-LABEL: func.func @all_local_no_hops(
 // CHECK-NOT:     "L1" -> "SFU"

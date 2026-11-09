@@ -2078,10 +2078,10 @@ std::unique_ptr<PathExpansionPlan> planPathExpansion(
     return nullptr;
   }
 
-  // PREP 5: Check whether path expansion is needed. A pipeline with no hops
-  // still has to be rewritten if PREP 4 gave a stage a unit that the IR does
-  // not record yet: that stage needs its applicable_units, and its FIFOs the
-  // unit as their endpoint.
+  // PREP 5: Check whether path expansion is needed. A pipeline with no units
+  // attribute to stages still will be rewritten, so that the newly generated
+  // stages has correct units attribute. Also destination of fifos will be
+  // updated to units that run in each end, i.e. from L1 to L1LU/L1SU.
   if (!needsExpansion(flows, arch_graph) &&
       !hasUnrecordedStageUnits(sorted_stages, *plan)) {
     plan->changed = false;
