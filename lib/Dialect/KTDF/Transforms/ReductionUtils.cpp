@@ -37,23 +37,39 @@
 namespace mlir::ktdf {
 
 // ---------------------------------------------------------------------------
-// findInnerDimLoopDim
+// findInnerDimLoopDims
 // ---------------------------------------------------------------------------
-std::optional<unsigned> findInnerDimLoopDim(linalg::GenericOp generic_op) {
+SmallVector<unsigned> findInnerDimLoopDims(linalg::GenericOp generic_op,
+                                           int64_t stick_elements) {
   auto input_type =
       dyn_cast<RankedTensorType>(generic_op.getInputs().front().getType());
-  if (!input_type) return std::nullopt;
-
-  int64_t last = input_type.getRank() - 1;
+  if (!input_type) return {};
 
   AffineMap input_map = generic_op.getIndexingMapsArray().front();
-  auto dim_expr = dyn_cast<AffineDimExpr>(input_map.getResult(last));
-  if (!dim_expr) return std::nullopt;
-
-  unsigned loop_dim = dim_expr.getPosition();
   auto iter_types = generic_op.getIteratorTypesArray();
-  if (iter_types[loop_dim] == utils::IteratorType::reduction) return loop_dim;
-  return std::nullopt;
+
+  SmallVector<unsigned> reduction_dims;
+  bool has_parallel = false;
+  int64_t elements = 1;
+  for (int64_t axis = input_type.getRank() - 1;
+       axis >= 0 && elements < stick_elements; --axis) {
+    auto dim_expr = dyn_cast<AffineDimExpr>(input_map.getResult(axis));
+    if (!dim_expr) return {};
+
+    const int64_t size = input_type.getDimSize(axis);
+    if (size == 1) continue;
+    elements = ShapedType::isDynamic(size) ? stick_elements : elements * size;
+
+    const unsigned loop_dim = dim_expr.getPosition();
+    if (iter_types[loop_dim] == utils::IteratorType::reduction)
+      reduction_dims.push_back(loop_dim);
+    else
+      has_parallel = true;
+  }
+
+  assert((!has_parallel || reduction_dims.empty()) &&
+         "a stick whose axes mix reduction and parallel is not supported");
+  return reduction_dims;
 }
 
 // ---------------------------------------------------------------------------

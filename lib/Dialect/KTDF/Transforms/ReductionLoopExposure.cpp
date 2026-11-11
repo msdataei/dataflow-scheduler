@@ -23,7 +23,9 @@
 // Algorithm:
 //   1. Walk the module for any ktdf.stage containing a linalg.generic with
 //      a reduction iterator — this is the compute stage.
-//   2. Collect reduction_dims[] and their per-dimension sizes dim_sizes[].
+//   2. Collect reduction_dims[] and their per-dimension sizes dim_sizes[],
+//      leaving out the in-stick dims: those of the trailing input axes that
+//      hold one stick (the default compute unit's vector lanes).
 //      The total shrink factor R = product(dim_sizes[]).
 //   3. Get the parent ktdf.pipeline of the compute stage.
 //   4. Find the load stage via StageFactory::findLoadStage (upstream of
@@ -65,6 +67,9 @@
 #include "dataflow-scheduler/Dialect/KTDF/Transforms/Passes.h"
 #include "dataflow-scheduler/Dialect/KTDF/Transforms/ReductionUtils.h"
 #include "dataflow-scheduler/Dialect/KTDF/Utils/Utils.h"
+#include "dataflow-scheduler/Dialect/KTDFArch/Analysis/DeviceManager.h"
+#include "dataflow-scheduler/Dialect/KTDFArch/Analysis/Mapping.h"
+#include "dataflow-scheduler/Transforms/Utils/Utils.h"
 #include "llvm/ADT/DenseSet.h"
 #include "llvm/Support/DebugLog.h"
 #include "mlir/Dialect/Arith/IR/Arith.h"
@@ -106,14 +111,17 @@ struct ReductionInfo {
 
 // ---------------------------------------------------------------------------
 // Fill `info` with the reduction dimensions and sizes derived from
-// `generic_op`, excluding the inner reduction dimension so
-// that it is left for later handling by the ktdf.opaque wrapping pass.
+// `generic_op`, excluding the in-stick reduction dimensions so that they are
+// left for later handling by the ktdf.opaque wrapping pass.  A stick holds as
+// many elements of the input as `compute` has vector lanes for, and can span
+// several trailing input axes.
 // Returns true on success.  Returns false (and emits a diagnostic or debug
 // message) when:
 //   - there are no outer-dim reduction dimensions to expose, or
 //   - any qualifying reduction dimension has a dynamic size.
 // ---------------------------------------------------------------------------
 static bool collectReductionInfo(linalg::GenericOp generic_op,
+                                 ktdf_arch::ExecutionUnitOp compute,
                                  ReductionInfo& info) {
   // FIXME: Current implementation leads to invalid IR when processing
   //        contractions, so skip them for now to allow matmul to pass.
@@ -122,15 +130,17 @@ static bool collectReductionInfo(linalg::GenericOp generic_op,
     return false;
   }
 
-  std::optional<unsigned> inner_dim = ktdf::findInnerDimLoopDim(generic_op);
-
   auto input_type =
       cast<RankedTensorType>(generic_op.getInputs().front().getType());
   int64_t input_rank = input_type.getRank();
 
-  // Collect reduction dims to expose as loops, excluding only the inner
-  // dim (loop dim at input axis input_rank-1).  Output-only reduction dims
-  // (i >= input_rank) are included.  Size-1 dims are skipped.
+  const SmallVector<unsigned> inner_dims = ktdf::findInnerDimLoopDims(
+      generic_op,
+      scheduler::getVectorLanes(input_type.getElementType(), compute));
+
+  // Collect reduction dims to expose as loops, excluding only the in-stick
+  // dims.  Output-only reduction dims (i >= input_rank) are included.  Size-1
+  // dims are skipped.
   auto output_type =
       cast<RankedTensorType>(generic_op.getOutputs().front().getType());
   AffineMap output_map = generic_op.getIndexingMapsArray().back();
@@ -138,8 +148,8 @@ static bool collectReductionInfo(linalg::GenericOp generic_op,
   auto iter_types = generic_op.getIteratorTypesArray();
   for (int64_t i = 0; i < static_cast<int64_t>(iter_types.size()); ++i) {
     if (iter_types[i] != utils::IteratorType::reduction) continue;
-    if (inner_dim && static_cast<unsigned>(i) == *inner_dim) {
-      LDBG(1) << PASS_NAME ": skipping inner-dim reduction dim " << i;
+    if (llvm::is_contained(inner_dims, static_cast<unsigned>(i))) {
+      LDBG(1) << PASS_NAME ": skipping in-stick reduction dim " << i;
       continue;
     }
 
@@ -193,7 +203,8 @@ static bool collectReductionInfo(linalg::GenericOp generic_op,
 // skipped (their reduction loops should not be exposed).
 // ---------------------------------------------------------------------------
 static void collectReductionGenericOps(
-    ktdf::StageOp stage, SmallVectorImpl<linalg::GenericOp>& result) {
+    ktdf::StageOp stage, ktdf_arch::ExecutionUnitOp compute,
+    SmallVectorImpl<linalg::GenericOp>& result) {
   // PreOrder so we see a nested ktdf.stage before its children, allowing
   // WalkResult::skip() to prevent descent into a different pipeline.
   stage.getBody()->walk<WalkOrder::PreOrder>([&](Operation* op) {
@@ -204,7 +215,8 @@ static void collectReductionGenericOps(
       if (generic.getInputs().front().getDefiningOp<linalg::GenericOp>())
         return WalkResult::advance();
       ReductionInfo info;
-      if (collectReductionInfo(generic, info)) result.push_back(generic);
+      if (collectReductionInfo(generic, compute, info))
+        result.push_back(generic);
     }
     return WalkResult::advance();
   });
@@ -427,10 +439,29 @@ struct ReductionLoopExposurePass
     if (DisableThisPass) return;
     LDBG(1) << "========= " PASS_NAME " =========";
     ModuleOp module = getOperation();
+
+    // The stick size comes from the default compute unit's vector lanes.
+    const auto& default_device = getAnalysis<ktdf_arch::DefaultDevice>();
+    if (!default_device) {
+      signalPassFailure();
+      return;
+    }
+    ktdf_arch::Mapping mapping(default_device.getRef());
+    compute_ = mapping.byKind().getDefaultCompute();
+    if (!compute_) {
+      mapping.getDevice().getDeclaration().emitError(
+          "no (unambiguous) default compute resource");
+      signalPassFailure();
+      return;
+    }
+
     if (failed(transformModule(module))) signalPassFailure();
   }
 
  private:
+  // The default compute unit, whose vector lanes give the stick size.
+  ktdf_arch::ExecutionUnitOp compute_;
+
   // -------------------------------------------------------------------------
   // Collect every (stage, generic) pair where the generic has outer-dim
   // reduction dims to expose, then rewrite each.
@@ -447,7 +478,7 @@ struct ReductionLoopExposurePass
     SmallVector<std::pair<ktdf::StageOp, linalg::GenericOp>> work_items;
     module.walk<WalkOrder::PostOrder>([&](ktdf::StageOp stage) {
       SmallVector<linalg::GenericOp> generics;
-      collectReductionGenericOps(stage, generics);
+      collectReductionGenericOps(stage, compute_, generics);
       for (auto generic : generics) work_items.emplace_back(stage, generic);
       return WalkResult::advance();
     });
@@ -471,7 +502,8 @@ struct ReductionLoopExposurePass
     // Each reduction dimension gets its own scf.for loop.  The total shrink
     // factor R = product(dim_sizes[]) is used only for FIFO resizing.
     ReductionInfo reduction_info;
-    if (!collectReductionInfo(generic_op, reduction_info)) return success();
+    if (!collectReductionInfo(generic_op, compute_, reduction_info))
+      return success();
     SmallVector<int64_t>& reduction_dims = reduction_info.reduction_dims;
     SmallVector<int64_t>& dim_sizes = reduction_info.dim_sizes;
     int64_t reduction_size = reduction_info.reduction_size;

@@ -137,9 +137,12 @@ def ReductionLoopExposurePass : Pass<"reduction-loop-exposure", "mlir::ModuleOp"
     loop per reduction dimension, with the accumulator tensor threaded as
     iter_args.
 
-    The innermost reduction dimension — identified as the reduction loop dim
-    that maps to the rightmost input tensor dimension — is excluded from loop
-    exposure and left as-is for later handling by a device PDL pattern.
+    The in-stick reduction dimensions are excluded from loop exposure and left
+    as-is for later handling by a device PDL pattern.  A stick holds as many
+    input elements as the default compute unit has vector lanes for, and is
+    made of the trailing input dimensions that together reach that size, so it
+    can span more than one (e.g. [..., 64, 2] for a 128-element stick).  A
+    stick whose dimensions mix reduction and parallel is not supported.
 
     The pass may be composed with ReductionDimChunking.  When the input has
     already been chunked, the Load stage body contains a scf.if that feeds
