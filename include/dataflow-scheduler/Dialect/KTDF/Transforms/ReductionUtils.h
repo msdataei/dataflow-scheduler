@@ -54,12 +54,20 @@
 namespace mlir::ktdf {
 
 // ---------------------------------------------------------------------------
-// Return the loop dimension index that corresponds to the innermost reduction:
-// the rightmost input dimension (input_rank - 1), if it is a reduction
-// iterator. Returns std::nullopt if the rightmost input dimension is not a
-// reduction.
+// Return the loop dimensions of the SIMD-lane reduction: those behind the
+// trailing input axes that together hold one SIMD lane of `simd_lane_elements`
+// elements, if they are reductions. A SIMD lane need not be the last axis
+// alone; it can span several, e.g. [..., 64, 2] for a 128-element SIMD lane.
+//
+// The axes are taken from the last one back until their sizes reach
+// `simd_lane_elements` (or the axes run out). Unit axes are passed over, and a
+// dynamic axis ends the SIMD lane. Returns an empty vector if the SIMD lane's
+// axes are parallel, or if one of them is not indexed by a plain loop
+// dimension. A SIMD lane whose axes mix reduction and parallel is not supported
+// (asserted).
 // ---------------------------------------------------------------------------
-std::optional<unsigned> findInnerDimLoopDim(linalg::GenericOp generic_op);
+SmallVector<unsigned> findInnerDimLoopDims(linalg::GenericOp generic_op,
+                                           int64_t simd_lane_elements);
 
 // ---------------------------------------------------------------------------
 // Result of StageFactory::buildFifoPrivate.
