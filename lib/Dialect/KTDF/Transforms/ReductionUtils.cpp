@@ -42,8 +42,8 @@ namespace mlir::ktdf {
 SmallVector<unsigned> findInnerDimLoopDims(linalg::GenericOp generic_op,
                                            int64_t stick_elements) {
   auto input_type =
-      dyn_cast<RankedTensorType>(generic_op.getInputs().front().getType());
-  if (!input_type) return {};
+      dyn_cast<ShapedType>(generic_op.getInputs().front().getType());
+  if (!input_type || !input_type.hasRank()) return {};
 
   AffineMap input_map = generic_op.getIndexingMapsArray().front();
   auto iter_types = generic_op.getIteratorTypesArray();

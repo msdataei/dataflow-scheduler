@@ -57,7 +57,8 @@ namespace mlir::ktdf {
 // Return the loop dimensions of the in-stick reduction: those behind the
 // trailing input axes that together hold one stick of `stick_elements`
 // elements, if they are reductions. A stick need not be the last axis alone;
-// it can span several, e.g. [..., 64, 2] for a 128-element stick.
+// it can span several, e.g. [..., 64, 2] for a 128-element stick. The input
+// may be a ranked tensor or a memref.
 //
 // The axes are taken from the last one back until their sizes reach
 // `stick_elements` (or the axes run out). Unit axes are passed over, and a
