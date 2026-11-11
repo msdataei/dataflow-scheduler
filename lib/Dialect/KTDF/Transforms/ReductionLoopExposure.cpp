@@ -132,18 +132,18 @@ static bool collectReductionInfo(linalg::GenericOp generic_op,
 
   auto input_type =
       cast<RankedTensorType>(generic_op.getInputs().front().getType());
-  int64_t input_rank = input_type.getRank();
 
   const SmallVector<unsigned> inner_dims = ktdf::findInnerDimLoopDims(
       generic_op,
       scheduler::getVectorLanes(input_type.getElementType(), compute));
 
   // Collect reduction dims to expose as loops, excluding only the in-stick
-  // dims.  Output-only reduction dims (i >= input_rank) are included.  Size-1
-  // dims are skipped.
-  auto output_type =
-      cast<RankedTensorType>(generic_op.getOutputs().front().getType());
-  AffineMap output_map = generic_op.getIndexingMapsArray().back();
+  // dims.  Output-only reduction dims are included.  Size-1 dims are skipped.
+  //
+  // A loop dim's size is read off whichever operand it indexes, through that
+  // operand's map: loop dim i is not input axis i unless the input map is the
+  // identity.
+  const SmallVector<int64_t> loop_ranges = generic_op.getStaticLoopRanges();
 
   auto iter_types = generic_op.getIteratorTypesArray();
   for (int64_t i = 0; i < static_cast<int64_t>(iter_types.size()); ++i) {
@@ -153,21 +153,7 @@ static bool collectReductionInfo(linalg::GenericOp generic_op,
       continue;
     }
 
-    // Determine the size of this loop dim from the input tensor (if it
-    // appears there) or from the output tensor (output-only dim).
-    int64_t dim_sz = ShapedType::kDynamic;
-    if (i < input_rank) {
-      dim_sz = input_type.getDimSize(i);
-    } else {
-      for (unsigned r = 0; r < output_map.getNumResults(); ++r) {
-        auto expr = dyn_cast<AffineDimExpr>(output_map.getResult(r));
-        if (expr && expr.getPosition() == static_cast<unsigned>(i)) {
-          dim_sz = output_type.getDimSize(r);
-          break;
-        }
-      }
-    }
-
+    const int64_t dim_sz = loop_ranges[i];
     if (dim_sz == ShapedType::kDynamic) {
       LDBG(1) << PASS_NAME ": dynamic reduction size not supported — skipping";
       return false;
