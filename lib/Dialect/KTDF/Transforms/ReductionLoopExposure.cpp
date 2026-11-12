@@ -120,9 +120,9 @@ struct ReductionInfo {
 // Returns true on success.  Returns false (and emits a debug message) when:
 //   - there are no outer-dim reduction dimensions to expose, or
 //   - any qualifying reduction dimension has a dynamic size.
-// Fails (and emits an error) when the first input cannot be sliced along the
-// reduction dims: its map is not a projected permutation, or a reduction dim
-// to expose does not index it.
+// Fails (and emits an error) when the reduction has more than one input, or
+// when the first input cannot be sliced along the reduction dims: its map is
+// not a projected permutation, or a reduction dim to expose does not index it.
 // ---------------------------------------------------------------------------
 static FailureOr<bool> collectReductionInfo(linalg::GenericOp generic_op,
                                             ReductionInfo& info) {
@@ -179,6 +179,13 @@ static FailureOr<bool> collectReductionInfo(linalg::GenericOp generic_op,
     LDBG(1) << PASS_NAME ": no outer-dim reduction dims to expose — skipping";
     return false;
   }
+
+  // The loop slices the first input only; any other input would be left
+  // whole while the reduction reads it slice by slice.
+  if (generic_op.getNumDpsInputs() != 1)
+    return generic_op.emitError(PASS_NAME)
+           << ": a reduction with " << generic_op.getNumDpsInputs()
+           << " inputs is not supported; only the first input would be sliced";
 
   LDBG(1) << PASS_NAME ": reduction_dims=[";
   for (size_t i = 0; i < info.reduction_dims.size(); ++i) {
@@ -885,22 +892,10 @@ struct ReductionLoopExposurePass
       return WalkResult::advance();
     });
 
-    // If we cannot identify the main transfer, fall back to wrapping everything
-    // (original behaviour) — keeps the pass safe for pipelines without a
-    // partial accumulator path.
-    if (!main_transfer) {
-      auto nested =
-          rewritePlainStage(rewriter, loc, ctx, stage, dim_sizes, start, step);
-      WalkResult walk =
-          nested.innermost_loop.getBody()->walk([&](ktdf::DataTransferOp dt) {
-            if (dt.isDestFifo() &&
-                failed(patchInputTransfer(dt, nested, input_dims, tensor_rank,
-                                          ctx)))
-              return WalkResult::interrupt();
-            return WalkResult::advance();
-          });
-      return failure(walk.wasInterrupted());
-    }
+    // fifo_in is the destination of a transfer in this stage (that is how
+    // findFifoInTransfer chose it), so only that transfer is ever patched.
+    assert(main_transfer &&
+           "no data_transfer in the load stage writes fifo_in");
 
     // Build the reduction loop shell at the end of the stage body (after all
     // existing ops), so the scf.if for the partial stays before the loop.

@@ -230,6 +230,15 @@ struct ReductionDimChunkingPass
     // chunked loop dim to the first-input dim it indexes.
     generic_op.getReductionDims(reduction_chunk.reduction_dims);
 
+    // Mapping a loop dim to the input dim it indexes needs a projected
+    // permutation.
+    AffineMap input_map =
+        generic_op.getMatchingIndexingMap(generic_op.getDpsInputOperand(0));
+    if (!input_map.isProjectedPermutation())
+      return inner_pipeline.emitError(PASS_NAME)
+             << ": the first input of the reduction is not indexed by a "
+                "projected permutation, so its chunk cannot be sliced";
+
     if (numChunks.empty()) {
       // Auto-infer via analysis — GCD-based outer-to-inner chunking.
 
@@ -237,13 +246,10 @@ struct ReductionDimChunkingPass
       // innermost dim of the first input (the innermost input dim must never
       // be chunked). Under a non-identity map that is not necessarily the
       // innermost loop dim.
-      AffineMap input_map =
-          generic_op.getMatchingIndexingMap(generic_op.getDpsInputOperand(0));
-      if (input_map.getNumResults() != 0) {
-        if (auto innermost =
-                dyn_cast<AffineDimExpr>(input_map.getResults().back()))
-          llvm::erase(reduction_chunk.reduction_dims, innermost.getPosition());
-      }
+      if (input_map.getNumResults() != 0)
+        llvm::erase(
+            reduction_chunk.reduction_dims,
+            cast<AffineDimExpr>(input_map.getResults().back()).getPosition());
       if (reduction_chunk.reduction_dims.empty()) {
         LDBG(1) << PASS_NAME
             ": could not find a chunkable reduction dimension — skipping";
@@ -347,6 +353,14 @@ struct ReductionDimChunkingPass
       return success();
     }
 
+    // The chunk is cut from the first input only; any other input would be
+    // left whole while the reduction reads it chunk by chunk.
+    if (generic_op.getNumDpsInputs() != 1)
+      return generic_op.emitError(PASS_NAME)
+             << ": a reduction with " << generic_op.getNumDpsInputs()
+             << " inputs is not supported; only the first input would be "
+                "chunked";
+
     return rewriteComputeStage(inner_pipeline, load_stage, compute_stage,
                                store_stage, generic_op,
                                reduction_chunk.reduction_dims,
@@ -445,10 +459,8 @@ struct ReductionDimChunkingPass
     // identity map, so find them through the indexing map of the input.
     AffineMap input_map =
         generic_op.getMatchingIndexingMap(generic_op.getDpsInputOperand(0));
-    if (!input_map.isProjectedPermutation())
-      return inner_pipeline.emitError(PASS_NAME)
-             << ": the first input of the reduction is not indexed by a "
-                "projected permutation, so its chunk cannot be sliced";
+    assert(input_map.isProjectedPermutation() &&
+           "caller checks the input map is a projected permutation");
     SmallVector<unsigned> input_dims;
     for (unsigned dim : reduction_dims) {
       auto input_dim =
