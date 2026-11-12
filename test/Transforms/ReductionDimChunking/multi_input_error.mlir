@@ -1,7 +1,7 @@
 // RUN: dataflow-scheduler-opt --reduction-dim-chunking="num-chunks=4" %s -verify-diagnostics
 
-// The chunk is cut from the first input only, so a reduction with a second
-// input is rejected rather than reading that input whole on every chunk.
+// The pass can chunk only a single input, so a reduction with two inputs is
+// rejected and left untransformed.
 
 #in  = affine_map<(d0, d1, d2) -> (d0, d1, d2)>
 #out = affine_map<(d0, d1, d2) -> (d0, d2)>
@@ -29,7 +29,7 @@ module {
           %x = ktdf.read_from_fifo %p#0 : <"L1LU" -> "SFU", 16384xf16> -> tensor<1x256x64xf16>
           %y = ktdf.read_from_fifo %p#1 : <"L1LU" -> "SFU", 16384xf16> -> tensor<1x256x64xf16>
           %e = tensor.empty() : tensor<1x64xf16>
-          // expected-error @below {{reduction-dim-chunking: a reduction with 2 inputs is not supported; only the first input would be chunked}}
+          // expected-error @below {{reduction-dim-chunking: a reduction with 2 inputs is not supported; the pass can chunk only a single input}}
           %r = linalg.generic {indexing_maps = [#in, #in, #out], iterator_types = ["parallel", "reduction", "parallel"]} ins(%x, %y : tensor<1x256x64xf16>, tensor<1x256x64xf16>) outs(%e : tensor<1x64xf16>) {
           ^bb0(%a: f16, %a2: f16, %acc: f16):
             %d = arith.subf %a, %a2 : f16

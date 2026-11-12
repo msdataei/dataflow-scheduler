@@ -353,13 +353,14 @@ struct ReductionDimChunkingPass
       return success();
     }
 
-    // The chunk is cut from the first input only; any other input would be
-    // left whole while the reduction reads it chunk by chunk.
+    // The rewrite can chunk a single input. With more inputs the others would
+    // stay whole while the reduction reads them chunk by chunk, so the pass
+    // rejects the reduction instead of transforming it.
     if (generic_op.getNumDpsInputs() != 1)
       return generic_op.emitError(PASS_NAME)
              << ": a reduction with " << generic_op.getNumDpsInputs()
-             << " inputs is not supported; only the first input would be "
-                "chunked";
+             << " inputs is not supported; the pass can chunk only a "
+                "single input";
 
     return rewriteComputeStage(inner_pipeline, load_stage, compute_stage,
                                store_stage, generic_op,

@@ -180,12 +180,14 @@ static FailureOr<bool> collectReductionInfo(linalg::GenericOp generic_op,
     return false;
   }
 
-  // The loop slices the first input only; any other input would be left
-  // whole while the reduction reads it slice by slice.
+  // The rewrite can slice a single input. With more inputs the others would
+  // stay whole while the reduction reads them slice by slice, so the pass
+  // rejects the reduction instead of transforming it.
   if (generic_op.getNumDpsInputs() != 1)
     return generic_op.emitError(PASS_NAME)
            << ": a reduction with " << generic_op.getNumDpsInputs()
-           << " inputs is not supported; only the first input would be sliced";
+           << " inputs is not supported; the pass can slice only a single "
+              "input";
 
   LDBG(1) << PASS_NAME ": reduction_dims=[";
   for (size_t i = 0; i < info.reduction_dims.size(); ++i) {
