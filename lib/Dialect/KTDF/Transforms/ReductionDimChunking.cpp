@@ -49,6 +49,9 @@
 // with three stages built by ktdf::StageFactory (see ReductionUtils.h).  It is
 // marked modulo(size: 1): each chunk reads the partial result the previous one
 // stored, so chunk iterations must not overlap.
+// The reduction body must be a single associative and commutative op over the
+// input element and the accumulator, since chunks are merged by reapplying it;
+// any other body is rejected.
 // First-vs-rest accumulation behaviour is selected at runtime via
 // %condition = AND(iv_j == 0 for all active chunk loop IVs):
 //
@@ -122,6 +125,44 @@ static linalg::GenericOp findReductionGenericOp(ktdf::StageOp stage) {
     return WalkResult::advance();
   });
   return found;
+}
+
+// ---------------------------------------------------------------------------
+// Helper: whether the body of `generic_op`, a reduction with one input and one
+// output, is exactly one associative and commutative op over its two block
+// arguments, followed by the yield of its result.
+//
+// Chunking reduces each chunk on its own and then merges a chunk's result into
+// the partial result of the chunks before it by reapplying the body, with the
+// partial result as the input element.  That merge is only the reduction when
+// the body is a plain combiner of the two: reassociating it across chunks then
+// gives the same result.  A body that does more, such as acc + x * x, would
+// apply the extra work to the partial result as well.
+// ---------------------------------------------------------------------------
+static bool isAssociativeCommutativeCombiner(linalg::GenericOp generic_op) {
+  Block* body = generic_op.getBody();
+  if (body->getNumArguments() != 2 || !llvm::hasNItems(*body, 2)) return false;
+
+  Operation& combiner = body->front();
+  if (!isa<arith::AddFOp, arith::AddIOp, arith::MulFOp, arith::MulIOp,
+           arith::MaximumFOp, arith::MinimumFOp, arith::MaxNumFOp,
+           arith::MinNumFOp, arith::MaxSIOp, arith::MinSIOp, arith::MaxUIOp,
+           arith::MinUIOp, arith::AndIOp, arith::OrIOp, arith::XOrIOp>(
+          combiner))
+    return false;
+
+  // The combiner's operands are the input element and the accumulator, in
+  // either order.
+  Value in = body->getArgument(0);
+  Value acc = body->getArgument(1);
+  if (combiner.getNumOperands() != 2) return false;
+  Value lhs = combiner.getOperand(0);
+  Value rhs = combiner.getOperand(1);
+  if (!((lhs == in && rhs == acc) || (lhs == acc && rhs == in))) return false;
+
+  auto yield = dyn_cast<linalg::YieldOp>(body->getTerminator());
+  return yield && yield->getNumOperands() == 1 &&
+         yield->getOperand(0) == combiner.getResult(0);
 }
 
 // ---------------------------------------------------------------------------
@@ -362,6 +403,14 @@ struct ReductionDimChunkingPass
              << ": a reduction with " << generic_op.getNumDpsInputs()
              << " inputs is not supported; the pass can chunk only a "
                 "single input";
+
+    // Chunks are merged by reapplying the body, which is only the reduction
+    // for a plain associative and commutative combiner.
+    if (!isAssociativeCommutativeCombiner(generic_op))
+      return generic_op.emitError(PASS_NAME)
+             << ": the reduction body is not a single associative and "
+                "commutative op over the input element and the accumulator, "
+                "so its chunks cannot be merged";
 
     return rewriteComputeStage(inner_pipeline, load_stage, compute_stage,
                                store_stage, generic_op,
