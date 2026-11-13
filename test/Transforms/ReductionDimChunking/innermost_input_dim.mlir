@@ -17,7 +17,7 @@
 // CHECK-NEXT:      %[[C1:[a-z0-9_]+]] = arith.constant 1 : index
 // CHECK-NEXT:      scf.for %[[CHUNK:[a-z0-9_]+]] = %[[C0]] to %[[NCHUNKS]] step %[[C1]] {
 // CHECK-NEXT:        %[[FIRST:[a-z0-9_]+]] = arith.cmpi eq, %[[CHUNK]], %[[C0]] : index
-// CHECK-NEXT:        ktdf.pipeline {
+// CHECK-NEXT:        ktdf.pipeline modulo(size : 1) {
 // CHECK-NEXT:          %[[S:[0-9]+]]:5 = ktdf.private -> (!ktdf.fifo.slot<"L1LU" -> "SFU", 4096xf16>, !ktdf.fifo.slot<"L1LU" -> "SFU", 64xf16>, !ktdf.fifo.slot<"SFU" -> "L1SU", 64xf16>, !ktdf.token, !ktdf.token) {
 // CHECK-NEXT:            ktdf.fifo.allocate() -> !ktdf.fifo.slot<"L1LU" -> "SFU", 4096xf16>
 // CHECK-NEXT:            ktdf.fifo.allocate() -> !ktdf.fifo.slot<"L1LU" -> "SFU", 64xf16>

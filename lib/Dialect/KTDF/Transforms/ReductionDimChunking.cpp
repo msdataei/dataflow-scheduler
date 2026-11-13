@@ -46,7 +46,9 @@
 // scf.for loops — one per reduction dimension that has more than one chunk.
 // Dimensions whose num_chunks==1 produce no loop (the single chunk covers
 // the entire dimension).  Each innermost iteration contains one ktdf.pipeline
-// with three stages built by ktdf::StageFactory (see ReductionUtils.h).
+// with three stages built by ktdf::StageFactory (see ReductionUtils.h).  It is
+// marked modulo(size: 1): each chunk reads the partial result the previous one
+// stored, so chunk iterations must not overlap.
 // First-vs-rest accumulation behaviour is selected at runtime via
 // %condition = AND(iv_j == 0 for all active chunk loop IVs):
 //
@@ -577,8 +579,14 @@ struct ReductionDimChunkingPass
                                                /*width=*/1);
     }
 
-    // One ktdf.pipeline per innermost chunk iteration.
+    // One ktdf.pipeline per innermost chunk iteration. Each chunk reads back
+    // the partial result the previous chunk stored, a loop-carried dependency,
+    // so the pipeline must not overlap chunk iterations: modulo(size: 1) gives
+    // it a single resource set, which also keeps double-buffering off it. Any
+    // modulo on the original pipeline described its batch iterations and does
+    // not carry over.
     auto phase_pipeline = ktdf::PipelineOp::create(inner_builder, loc);
+    phase_pipeline.setModuloAttr(inner_builder.getI64IntegerAttr(1));
     OpBuilder pipe_bldr(phase_pipeline.getBody(),
                         phase_pipeline.getBody()->end());
 
