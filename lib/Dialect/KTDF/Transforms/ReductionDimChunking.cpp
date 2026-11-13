@@ -246,10 +246,9 @@ struct ReductionDimChunkingPass
       // innermost dim of the first input (the innermost input dim must never
       // be chunked). Under a non-identity map that is not necessarily the
       // innermost loop dim.
-      if (input_map.getNumResults() != 0)
-        llvm::erase(
-            reduction_chunk.reduction_dims,
-            cast<AffineDimExpr>(input_map.getResults().back()).getPosition());
+      if (std::optional<unsigned> innermost =
+              getInnermostInputLoopDim(generic_op))
+        llvm::erase(reduction_chunk.reduction_dims, *innermost);
       if (reduction_chunk.reduction_dims.empty()) {
         LDBG(1) << PASS_NAME
             ": could not find a chunkable reduction dimension — skipping";
@@ -269,8 +268,8 @@ struct ReductionDimChunkingPass
       const auto loop_ranges = generic_op.getStaticLoopRanges();
       for (unsigned dim : reduction_chunk.reduction_dims)
         reduction_chunk.red_dim_sizes.push_back(loop_ranges[dim]);
-      auto chunk_dims =
-          computeChunkDims(reduction_chunk.red_dim_sizes, result->num_chunks);
+      auto chunk_dims = computeChunkDims(
+          generic_op, reduction_chunk.reduction_dims, result->num_chunks);
       if (!chunk_dims) {
         inner_pipeline.emitError(
             PASS_NAME
