@@ -273,15 +273,6 @@ struct ReductionDimChunkingPass
     // chunked loop dim to the first-input dim it indexes.
     generic_op.getReductionDims(reduction_chunk.reduction_dims);
 
-    // Mapping a loop dim to the input dim it indexes needs a projected
-    // permutation.
-    AffineMap input_map =
-        generic_op.getMatchingIndexingMap(generic_op.getDpsInputOperand(0));
-    if (!input_map.isProjectedPermutation())
-      return inner_pipeline.emitError(PASS_NAME)
-             << ": the first input of the reduction is not indexed by a "
-                "projected permutation, so its chunk cannot be sliced";
-
     if (numChunks.empty()) {
       // Auto-infer via analysis — GCD-based outer-to-inner chunking.
 
@@ -394,6 +385,16 @@ struct ReductionDimChunkingPass
       LDBG(1) << PASS_NAME ": every reduction dim has one chunk, nothing to do";
       return success();
     }
+
+    // Mapping a loop dim to the input dim it indexes needs a projected
+    // permutation.  Checked only once a chunk is needed, so that a reduction
+    // that is left as it is (e.g. a small convolution) is not rejected.
+    AffineMap input_map =
+        generic_op.getMatchingIndexingMap(generic_op.getDpsInputOperand(0));
+    if (!input_map.isProjectedPermutation())
+      return inner_pipeline.emitError(PASS_NAME)
+             << ": the first input of the reduction is not indexed by a "
+                "projected permutation, so its chunk cannot be sliced";
 
     // The rewrite can chunk a single input. With more inputs the others would
     // stay whole while the reduction reads them chunk by chunk, so the pass
