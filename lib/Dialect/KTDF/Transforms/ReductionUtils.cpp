@@ -25,6 +25,8 @@
 #include <optional>
 
 #include "dataflow-scheduler/Dialect/KTDF/Utils/Utils.h"
+#include "dataflow-scheduler/Dialect/KTDFArch/Analysis/Mapping.h"
+#include "dataflow-scheduler/Transforms/Utils/Utils.h"
 #include "llvm/ADT/STLExtras.h"
 #include "mlir/Dialect/Arith/IR/Arith.h"
 #include "mlir/Dialect/Linalg/IR/Linalg.h"
@@ -72,6 +74,28 @@ SmallVector<unsigned> findInnerDimLoopDims(linalg::GenericOp generic_op,
   assert((!has_parallel || reduction_dims.empty()) &&
          "a SIMD lane whose axes mix reduction and parallel is not supported");
   return reduction_dims;
+}
+
+SmallVector<unsigned> findInnerDimLoopDims(linalg::GenericOp generic_op,
+                                           ktdf_arch::ExecutionUnitOp compute) {
+  auto input_type = cast<ShapedType>(generic_op.getInputs().front().getType());
+  return findInnerDimLoopDims(
+      generic_op,
+      scheduler::getVectorLanes(input_type.getElementType(), compute));
+}
+
+// ---------------------------------------------------------------------------
+// getDefaultComputeUnit
+// ---------------------------------------------------------------------------
+ktdf_arch::ExecutionUnitOp getDefaultComputeUnit(
+    const ktdf_arch::DefaultDevice& device) {
+  if (!device) return {};
+  ktdf_arch::Mapping mapping(device.getRef());
+  ktdf_arch::ExecutionUnitOp compute = mapping.byKind().getDefaultCompute();
+  if (!compute)
+    mapping.getDevice().getDeclaration().emitError(
+        "no (unambiguous) default compute resource");
+  return compute;
 }
 
 // ---------------------------------------------------------------------------

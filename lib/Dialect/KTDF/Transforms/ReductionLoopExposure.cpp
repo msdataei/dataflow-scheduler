@@ -71,8 +71,6 @@
 #include "dataflow-scheduler/Dialect/KTDF/Transforms/ReductionUtils.h"
 #include "dataflow-scheduler/Dialect/KTDF/Utils/Utils.h"
 #include "dataflow-scheduler/Dialect/KTDFArch/Analysis/DeviceManager.h"
-#include "dataflow-scheduler/Dialect/KTDFArch/Analysis/Mapping.h"
-#include "dataflow-scheduler/Transforms/Utils/Utils.h"
 #include "llvm/ADT/DenseSet.h"
 #include "llvm/Support/DebugLog.h"
 #include "mlir/Dialect/Arith/IR/Arith.h"
@@ -156,11 +154,8 @@ static FailureOr<bool> collectReductionInfo(linalg::GenericOp generic_op,
     return false;
   }
 
-  auto input_type =
-      cast<RankedTensorType>(generic_op.getInputs().front().getType());
-  const SmallVector<unsigned> inner_dims = ktdf::findInnerDimLoopDims(
-      generic_op,
-      scheduler::getVectorLanes(input_type.getElementType(), compute));
+  const SmallVector<unsigned> inner_dims =
+      ktdf::findInnerDimLoopDims(generic_op, compute);
 
   // Collect reduction dims to expose as loops, excluding only the SIMD-lane
   // dims.  Size-1 dims are skipped.
@@ -479,16 +474,9 @@ struct ReductionLoopExposurePass
     ModuleOp module = getOperation();
 
     // The SIMD lane size comes from the default compute unit's vector lanes.
-    const auto& default_device = getAnalysis<ktdf_arch::DefaultDevice>();
-    if (!default_device) {
-      signalPassFailure();
-      return;
-    }
-    ktdf_arch::Mapping mapping(default_device.getRef());
-    compute_ = mapping.byKind().getDefaultCompute();
+    compute_ =
+        ktdf::getDefaultComputeUnit(getAnalysis<ktdf_arch::DefaultDevice>());
     if (!compute_) {
-      mapping.getDevice().getDeclaration().emitError(
-          "no (unambiguous) default compute resource");
       signalPassFailure();
       return;
     }

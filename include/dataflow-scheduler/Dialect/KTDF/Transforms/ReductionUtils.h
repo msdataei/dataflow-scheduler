@@ -46,6 +46,7 @@
 #include <utility>
 
 #include "dataflow-scheduler/Dialect/KTDF/KTDF.h"
+#include "dataflow-scheduler/Dialect/KTDFArch/Analysis/DeviceManager.h"
 #include "llvm/ADT/SmallVector.h"
 #include "mlir/Dialect/Linalg/IR/Linalg.h"
 #include "mlir/IR/AffineMap.h"
@@ -65,10 +66,26 @@ namespace mlir::ktdf {
 // dynamic axis ends the SIMD lane. Returns an empty vector if the SIMD lane's
 // axes are parallel, or if one of them is not indexed by a plain loop
 // dimension. A SIMD lane whose axes mix reduction and parallel is not supported
-// (asserted).
+// (asserted). The dims are returned innermost first.
 // ---------------------------------------------------------------------------
 SmallVector<unsigned> findInnerDimLoopDims(linalg::GenericOp generic_op,
                                            int64_t simd_lane_elements);
+
+// ---------------------------------------------------------------------------
+// As above, with the SIMD lane sized by `compute`: as many elements of the
+// first input as `compute` has vector lanes for.
+// ---------------------------------------------------------------------------
+SmallVector<unsigned> findInnerDimLoopDims(linalg::GenericOp generic_op,
+                                           ktdf_arch::ExecutionUnitOp compute);
+
+// ---------------------------------------------------------------------------
+// Return the default compute unit of `device`, whose vector lanes size a
+// SIMD lane. Returns null if there is no device (the analysis has reported it)
+// or if the device has no unambiguous default compute unit (an error is emitted
+// on the device declaration).
+// ---------------------------------------------------------------------------
+ktdf_arch::ExecutionUnitOp getDefaultComputeUnit(
+    const ktdf_arch::DefaultDevice& device);
 
 // ---------------------------------------------------------------------------
 // Result of StageFactory::buildFifoPrivate.
