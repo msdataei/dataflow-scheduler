@@ -176,10 +176,6 @@ auto getReductionInitScalar(mlir::Value init) -> mlir::TypedAttr;
 /// init: a `tensor.empty`, or one `getReductionInitScalar` recognises.
 auto isSupportedReductionInit(mlir::Value init) -> bool;
 
-/// Erase the op that defines a reduction init once nothing reads `init`. Does
-/// nothing while `init` still has uses.
-void eraseDeadReductionInit(mlir::Value init);
-
 }  // namespace mlir::ktdf
 
 #endif  // DATAFLOW_SCHEDULER_DIALECT_KTDF_UTILS_UTILS_H_

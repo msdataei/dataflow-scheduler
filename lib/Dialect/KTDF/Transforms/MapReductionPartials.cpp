@@ -103,6 +103,7 @@
 #include "mlir/IR/BuiltinTypes.h"
 #include "mlir/IR/Dominance.h"
 #include "mlir/IR/IRMapping.h"
+#include "mlir/Interfaces/SideEffectInterfaces.h"
 #include "mlir/Pass/Pass.h"
 #include "mlir/Transforms/RegionUtils.h"
 
@@ -838,7 +839,9 @@ static LogicalResult lowerInnerDimInit(Value init, Value acc,
     fillThroughIdentityBuffer(builder, loc,
                               arith::ConstantOp::create(builder, loc, scalar),
                               lane.getResult());
-    ktdf::eraseDeadReductionInit(init);
+    if (Operation* def = init.getDefiningOp()) {
+      if (isOpTriviallyDead(def)) def->erase();
+    }
     return success();
   }
 

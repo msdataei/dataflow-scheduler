@@ -322,10 +322,3 @@ auto mlir::ktdf::isSupportedReductionInit(Value init) -> bool {
   return init.getDefiningOp<tensor::EmptyOp>() ||
          static_cast<bool>(getReductionInitScalar(init));
 }
-
-void mlir::ktdf::eraseDeadReductionInit(Value init) {
-  Operation* def = init.getDefiningOp();
-  if (def && init.use_empty()) {
-    def->erase();
-  }
-}

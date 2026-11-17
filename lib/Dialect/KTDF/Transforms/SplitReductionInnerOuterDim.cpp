@@ -37,6 +37,7 @@
 #include "mlir/IR/Builders.h"
 #include "mlir/IR/BuiltinOps.h"
 #include "mlir/IR/IRMapping.h"
+#include "mlir/Interfaces/SideEffectInterfaces.h"
 #include "mlir/Pass/Pass.h"
 
 #define PASS_NAME "split-reduction-inner-outer-dim"
@@ -505,7 +506,11 @@ static LogicalResult splitDim(CandidateInfo& info) {
   SmallVector<Value> orig_inits(generic_op.getOutputs());
   generic_op.erase();
   // An init G2 took over still has a use, and is left in place.
-  for (Value init : orig_inits) ktdf::eraseDeadReductionInit(init);
+  for (Value init : orig_inits) {
+    if (Operation* def = init.getDefiningOp()) {
+      if (isOpTriviallyDead(def)) def->erase();
+    }
+  }
   return success();
 }
 
