@@ -143,6 +143,8 @@ struct ReductionInfo {
 // Fails (and emits an error) when the reduction has more than one input, or
 // when the first input cannot be sliced along the reduction dims: its map is
 // not a projected permutation, or a reduction dim to expose does not index it.
+// Also fails (and emits an error) when the dims of its SIMD lane mix reduction
+// and parallel.
 // ---------------------------------------------------------------------------
 static FailureOr<bool> collectReductionInfo(linalg::GenericOp generic_op,
                                             ktdf_arch::ExecutionUnitOp compute,
@@ -154,8 +156,12 @@ static FailureOr<bool> collectReductionInfo(linalg::GenericOp generic_op,
     return false;
   }
 
-  const SmallVector<unsigned> inner_dims =
+  FailureOr<SmallVector<unsigned>> inner_dims =
       ktdf::findInnerDimLoopDims(generic_op, compute);
+  if (failed(inner_dims))
+    return generic_op.emitError(PASS_NAME)
+           << ": a SIMD lane whose dims mix reduction and parallel is not "
+              "supported";
 
   // Collect reduction dims to expose as loops, excluding only the SIMD-lane
   // dims.  Size-1 dims are skipped.
@@ -166,7 +172,7 @@ static FailureOr<bool> collectReductionInfo(linalg::GenericOp generic_op,
   auto iter_types = generic_op.getIteratorTypesArray();
   for (int64_t i = 0; i < static_cast<int64_t>(iter_types.size()); ++i) {
     if (iter_types[i] != utils::IteratorType::reduction) continue;
-    if (llvm::is_contained(inner_dims, static_cast<unsigned>(i))) {
+    if (llvm::is_contained(*inner_dims, static_cast<unsigned>(i))) {
       LDBG(1) << PASS_NAME ": skipping SIMD-lane reduction dim " << i;
       continue;
     }

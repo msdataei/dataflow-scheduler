@@ -65,18 +65,21 @@ namespace mlir::ktdf {
 // `simd_lane_elements` (or the axes run out). Unit axes are passed over, and a
 // dynamic axis ends the SIMD lane. Returns an empty vector if the SIMD lane's
 // axes are parallel, or if one of them is not indexed by a plain loop
-// dimension. A SIMD lane whose axes mix reduction and parallel is not supported
-// (asserted). The dims are returned innermost first.
+// dimension. The dims are returned innermost first.
+//
+// A SIMD lane whose axes mix reduction and parallel is not supported: fails,
+// without a diagnostic, so that each caller reports it in its own terms (or,
+// for a pattern constraint, just does not match).
 // ---------------------------------------------------------------------------
-SmallVector<unsigned> findInnerDimLoopDims(linalg::GenericOp generic_op,
-                                           int64_t simd_lane_elements);
+FailureOr<SmallVector<unsigned>> findInnerDimLoopDims(
+    linalg::GenericOp generic_op, int64_t simd_lane_elements);
 
 // ---------------------------------------------------------------------------
 // As above, with the SIMD lane sized by `compute`: as many elements of the
 // first input as `compute` has vector lanes for.
 // ---------------------------------------------------------------------------
-SmallVector<unsigned> findInnerDimLoopDims(linalg::GenericOp generic_op,
-                                           ktdf_arch::ExecutionUnitOp compute);
+FailureOr<SmallVector<unsigned>> findInnerDimLoopDims(
+    linalg::GenericOp generic_op, ktdf_arch::ExecutionUnitOp compute);
 
 // ---------------------------------------------------------------------------
 // Return the default compute unit of `device`, whose vector lanes size a
