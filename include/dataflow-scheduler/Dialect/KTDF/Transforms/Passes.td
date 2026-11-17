@@ -115,10 +115,15 @@ def SimplifyPipelinePass : Pass<"simplify-pipeline", "mlir::func::FuncOp"> {
 def SplitReductionInnerOuterDimPass : Pass<"split-reduction-inner-outer-dim", "mlir::ModuleOp"> {
   let summary = "Split the inner and outer dimensions of a reduction";
   let description = [{
-    Walks the module for linalg.generic ops with at least one reduction
-    iterator and splits each reduction dimension into an inner dimension of
-    stick size (derived from the hardware SIMD feature) and an outer
-    dimension of size reduction_dim / stick size.
+    Walks the module for linalg.generic ops with at least two reduction
+    iterators and splits each into two generics: the first reduces the outer
+    reduction dimensions, the second the SIMD-lane ones.  The SIMD-lane
+    dimensions are those behind the trailing input dimensions that together
+    hold one SIMD lane, as many input elements as the compute unit has SIMD
+    lanes for; a SIMD lane can span more than one (e.g. [..., 32, 2] for a
+    64-element SIMD lane).  A reduction whose SIMD lane is not a reduction, or whose
+    reduction dimensions are all in the SIMD lane, is left as it is.  SIMD-lane
+    dimensions that do not hold exactly one SIMD lane are an error.
   }];
   let constructor = "::mlir::ktdf::createSplitReductionInnerOuterDimPass()";
   let dependentDialects = [
