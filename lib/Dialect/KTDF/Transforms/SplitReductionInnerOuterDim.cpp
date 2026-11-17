@@ -145,7 +145,8 @@ static bool isEligible(linalg::GenericOp generic_op) {
 // Returns std::nullopt (with a debug note) when there is nothing to split: a
 // reduction dim has a dynamic size, the SIMD lane's axes are not reductions, or
 // every reduction dim is in the SIMD lane.  Fails (and emits an error) when the
-// SIMD-lane dims do not hold exactly one SIMD lane.
+// SIMD-lane dims do not hold exactly one SIMD lane, or when the SIMD lane's
+// dims mix reduction and parallel.
 // ---------------------------------------------------------------------------
 static FailureOr<std::optional<CandidateInfo>> partitionReductionDims(
     linalg::GenericOp generic_op, int64_t vector_length) {
@@ -156,8 +157,13 @@ static FailureOr<std::optional<CandidateInfo>> partitionReductionDims(
   if (failed(collectReductionDims(generic_op, all_dims)))
     return std::optional<CandidateInfo>();
 
-  const SmallVector<unsigned> simd_lane_dims =
+  FailureOr<SmallVector<unsigned>> simd_lane =
       ktdf::findInnerDimLoopDims(generic_op, vector_length);
+  if (failed(simd_lane))
+    return generic_op.emitError(PASS_NAME)
+           << ": a SIMD lane whose dims mix reduction and parallel is not "
+              "supported";
+  const SmallVector<unsigned>& simd_lane_dims = *simd_lane;
   if (simd_lane_dims.empty()) {
     LDBG(1) << PASS_NAME ": the SIMD lane is not a reduction — skipping";
     return std::optional<CandidateInfo>();

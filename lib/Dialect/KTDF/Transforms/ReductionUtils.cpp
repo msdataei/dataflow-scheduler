@@ -42,11 +42,11 @@ namespace mlir::ktdf {
 // ---------------------------------------------------------------------------
 // findInnerDimLoopDims
 // ---------------------------------------------------------------------------
-SmallVector<unsigned> findInnerDimLoopDims(linalg::GenericOp generic_op,
-                                           int64_t simd_lane_elements) {
+FailureOr<SmallVector<unsigned>> findInnerDimLoopDims(
+    linalg::GenericOp generic_op, int64_t simd_lane_elements) {
   auto input_type =
       dyn_cast<ShapedType>(generic_op.getInputs().front().getType());
-  if (!input_type || !input_type.hasRank()) return {};
+  if (!input_type || !input_type.hasRank()) return SmallVector<unsigned>();
 
   AffineMap input_map = generic_op.getIndexingMapsArray().front();
   auto iter_types = generic_op.getIteratorTypesArray();
@@ -57,7 +57,7 @@ SmallVector<unsigned> findInnerDimLoopDims(linalg::GenericOp generic_op,
   for (int64_t axis = input_type.getRank() - 1;
        axis >= 0 && elements < simd_lane_elements; --axis) {
     auto dim_expr = dyn_cast<AffineDimExpr>(input_map.getResult(axis));
-    if (!dim_expr) return {};
+    if (!dim_expr) return SmallVector<unsigned>();
 
     const int64_t size = input_type.getDimSize(axis);
     if (size == 1) continue;
@@ -71,13 +71,13 @@ SmallVector<unsigned> findInnerDimLoopDims(linalg::GenericOp generic_op,
       has_parallel = true;
   }
 
-  assert((!has_parallel || reduction_dims.empty()) &&
-         "a SIMD lane whose axes mix reduction and parallel is not supported");
+  // A SIMD lane whose axes mix reduction and parallel is not supported.
+  if (has_parallel && !reduction_dims.empty()) return failure();
   return reduction_dims;
 }
 
-SmallVector<unsigned> findInnerDimLoopDims(linalg::GenericOp generic_op,
-                                           ktdf_arch::ExecutionUnitOp compute) {
+FailureOr<SmallVector<unsigned>> findInnerDimLoopDims(
+    linalg::GenericOp generic_op, ktdf_arch::ExecutionUnitOp compute) {
   auto input_type = cast<ShapedType>(generic_op.getInputs().front().getType());
   return findInnerDimLoopDims(
       generic_op,
