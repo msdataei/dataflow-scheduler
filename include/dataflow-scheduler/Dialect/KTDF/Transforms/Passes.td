@@ -316,13 +316,17 @@ def ReductionDimChunkingPass : Pass<"reduction-dim-chunking", "mlir::ModuleOp"> 
     the outermost reduction dimension, each step absorbs gcd(dim_size,
     remaining_chunk) into that dimension and passes remaining/gcd inward.
     Dimensions with a symbolic (dynamic) size are skipped without consuming
-    any of the remaining chunk budget.  The innermost dimension of the first
-    input is never chunked — the reduction dim indexing it is excluded before
-    distribution begins.
+    any of the remaining chunk budget.  The SIMD-lane dimensions are never
+    chunked — the reduction dims behind the trailing input dimensions that
+    hold one SIMD lane (as many input elements as the default compute unit has
+    vector lanes for) are excluded before distribution begins.  A SIMD lane can
+    span more than one dimension (e.g. [..., 32, 2] for a 64-element SIMD lane).
 
     When num-chunks is specified explicitly, multi-dim chunking is applied:
     one value per reduction dimension (in iterator-type order), one nested
-    scf.for per dim (dims with chunk count 1 produce no loop).
+    scf.for per dim (dims with chunk count 1 produce no loop).  The counts
+    must not split a SIMD lane: only the outermost SIMD-lane dimension can be
+    chunked, into chunks holding whole SIMD lanes.
 
     First-vs-rest accumulation behaviour is selected at runtime via
     `%condition = AND(iv_j == 0 for all active chunk loop IVs)`:
