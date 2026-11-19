@@ -95,7 +95,7 @@ auto ktdfIsInnerDimReduction(mlir::Operation* op,
   // A SIMD lane whose dims mix reduction and parallel is not supported; the
   // passes before this one report it, and here it just does not match.
   mlir::FailureOr<llvm::SmallVector<unsigned>> simd_lane_dims =
-      mlir::ktdf::findInnerDimLoopDims(generic, simd_lane_elements);
+      mlir::ktdf::findReductionSimdLaneDims(generic, simd_lane_elements);
   return mlir::success(mlir::succeeded(simd_lane_dims) &&
                        !simd_lane_dims->empty());
 }

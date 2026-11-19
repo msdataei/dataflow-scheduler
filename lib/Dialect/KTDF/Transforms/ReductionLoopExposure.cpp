@@ -157,7 +157,7 @@ static FailureOr<bool> collectReductionInfo(linalg::GenericOp generic_op,
   }
 
   FailureOr<SmallVector<unsigned>> inner_dims =
-      ktdf::findInnerDimLoopDims(generic_op, compute);
+      ktdf::findReductionSimdLaneDims(generic_op, compute);
   if (failed(inner_dims))
     return generic_op.emitError(PASS_NAME)
            << ": a SIMD lane whose dims mix reduction and parallel is not "

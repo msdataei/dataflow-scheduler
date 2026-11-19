@@ -173,12 +173,12 @@ static bool isAssociativeCommutativeCombiner(linalg::GenericOp generic_op) {
 // ---------------------------------------------------------------------------
 // Helper: whether cutting SIMD-lane reduction dim `dim` of `generic_op` into
 // `num_chunks` chunks would split a SIMD lane, so that a chunk would not hold
-// whole SIMD lanes.  `simd_lane_dims` is findInnerDimLoopDims of `generic_op`,
-// innermost first.  Only the outermost of them can be chunked, and only into
-// chunks that, with the dims inside it, hold a whole number of SIMD lanes: e.g.
-// a [256] SIMD lane dim cut into 4 chunks of one 64-element SIMD lane each, but
-// not a [32, 2] SIMD lane cut along its 32.  A dim not in the SIMD lane splits
-// none.
+// whole SIMD lanes.  `simd_lane_dims` is findReductionSimdLaneDims of
+// `generic_op`, innermost first.  Only the outermost of them can be chunked,
+// and only into chunks that, with the dims inside it, hold a whole number of
+// SIMD lanes: e.g. a [256] SIMD lane dim cut into 4 chunks of one 64-element
+// SIMD lane each, but not a [32, 2] SIMD lane cut along its 32.  A dim not in
+// the SIMD lane splits none.
 // ---------------------------------------------------------------------------
 static bool splitsSimdLane(linalg::GenericOp generic_op,
                            ArrayRef<unsigned> simd_lane_dims, unsigned dim,
@@ -319,7 +319,7 @@ struct ReductionDimChunkingPass
             .getElementType(),
         compute_);
     FailureOr<SmallVector<unsigned>> simd_lane =
-        findInnerDimLoopDims(generic_op, simd_lane_elements);
+        findReductionSimdLaneDims(generic_op, simd_lane_elements);
     if (failed(simd_lane))
       return generic_op.emitError(PASS_NAME)
              << ": a SIMD lane whose dims mix reduction and parallel is not "

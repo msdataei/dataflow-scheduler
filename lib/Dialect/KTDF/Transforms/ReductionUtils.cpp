@@ -40,9 +40,9 @@
 namespace mlir::ktdf {
 
 // ---------------------------------------------------------------------------
-// findInnerDimLoopDims
+// findReductionSimdLaneDims
 // ---------------------------------------------------------------------------
-FailureOr<SmallVector<unsigned>> findInnerDimLoopDims(
+FailureOr<SmallVector<unsigned>> findReductionSimdLaneDims(
     linalg::GenericOp generic_op, int64_t simd_lane_elements) {
   auto input_type =
       dyn_cast<ShapedType>(generic_op.getInputs().front().getType());
@@ -76,10 +76,10 @@ FailureOr<SmallVector<unsigned>> findInnerDimLoopDims(
   return reduction_dims;
 }
 
-FailureOr<SmallVector<unsigned>> findInnerDimLoopDims(
+FailureOr<SmallVector<unsigned>> findReductionSimdLaneDims(
     linalg::GenericOp generic_op, ktdf_arch::ExecutionUnitOp compute) {
   auto input_type = cast<ShapedType>(generic_op.getInputs().front().getType());
-  return findInnerDimLoopDims(
+  return findReductionSimdLaneDims(
       generic_op,
       scheduler::getVectorLanes(input_type.getElementType(), compute));
 }

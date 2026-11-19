@@ -25,8 +25,8 @@
 
 #include "dataflow-scheduler/Dialect/KTDF/KTDF.h"
 #include "dataflow-scheduler/Dialect/KTDF/Transforms/Passes.h"
-#include "dataflow-scheduler/Dialect/KTDF/Utils/Utils.h"
 #include "dataflow-scheduler/Dialect/KTDF/Transforms/ReductionUtils.h"
+#include "dataflow-scheduler/Dialect/KTDF/Utils/Utils.h"
 #include "dataflow-scheduler/Dialect/KTDFArch/Analysis/DeviceManager.h"
 #include "dataflow-scheduler/Dialect/KTDFArch/Analysis/Mapping.h"
 #include "dataflow-scheduler/Transforms/Utils/Utils.h"
@@ -158,7 +158,7 @@ static FailureOr<std::optional<CandidateInfo>> partitionReductionDims(
     return std::optional<CandidateInfo>();
 
   FailureOr<SmallVector<unsigned>> simd_lane =
-      ktdf::findInnerDimLoopDims(generic_op, vector_length);
+      ktdf::findReductionSimdLaneDims(generic_op, vector_length);
   if (failed(simd_lane))
     return generic_op.emitError(PASS_NAME)
            << ": a SIMD lane whose dims mix reduction and parallel is not "
