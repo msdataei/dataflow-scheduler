@@ -41,8 +41,7 @@ namespace mlir::ktdf {
 // findInnerDimLoopDim
 // ---------------------------------------------------------------------------
 std::optional<unsigned> findInnerDimLoopDim(linalg::GenericOp generic_op) {
-  if (generic_op.getInputs().empty())
-    return std::nullopt;
+  if (generic_op.getInputs().empty()) return std::nullopt;
 
   auto input_type =
       dyn_cast<RankedTensorType>(generic_op.getInputs().front().getType());

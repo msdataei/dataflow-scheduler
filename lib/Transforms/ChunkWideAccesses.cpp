@@ -375,8 +375,7 @@ mlir::LogicalResult splitSlot(mlir::RewriterBase& rewriter, mlir::Value slot,
 }
 
 struct ChunkWideAccessesPass
-    : public scheduler::impl::ChunkWideAccessesPassBase<
-          ChunkWideAccessesPass> {
+    : public scheduler::impl::ChunkWideAccessesPassBase<ChunkWideAccessesPass> {
   void runOnOperation() override {
     if (DisableThisPass) return;
     LDBG(1) << "========= " PASS_NAME " =========";

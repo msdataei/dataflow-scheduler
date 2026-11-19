@@ -280,8 +280,8 @@ static int64_t getStageLanes(
 // Fails when a dimension neither divides nor is divided by what remains of
 // the tile, or when `shape` holds fewer than `lanes` elements.
 // ---------------------------------------------------------------------------
-static FailureOr<SmallVector<int64_t>> getLaneTileShape(
-    ArrayRef<int64_t> shape, int64_t lanes) {
+static FailureOr<SmallVector<int64_t>> getLaneTileShape(ArrayRef<int64_t> shape,
+                                                        int64_t lanes) {
   SmallVector<int64_t> tile(shape.size(), 1);
   int64_t remaining = lanes;
   for (int64_t d = static_cast<int64_t>(shape.size()) - 1;
@@ -382,8 +382,7 @@ static LogicalResult materializeInitialValue(OpBuilder& builder, Location loc,
     }
     auto subview =
         memref::SubViewOp::create(builder, loc, plain, offsets, *tile, strides);
-    memref::CopyOp::create(builder, loc, init.getResult(),
-                           subview.getResult());
+    memref::CopyOp::create(builder, loc, init.getResult(), subview.getResult());
   }
   return success();
 }
@@ -418,8 +417,7 @@ static LogicalResult materializeInitialValue(OpBuilder& builder, Location loc,
 // ---------------------------------------------------------------------------
 static LogicalResult lowerIterArgInitializer(
     Value init_val, Value alloc_val, linalg::GenericOp generic_op,
-    OpBuilder& builder,
-    const mlir::ktdf_arch::ResourceKinds& resource_kinds) {
+    OpBuilder& builder, const mlir::ktdf_arch::ResourceKinds& resource_kinds) {
   Operation* defining_op = init_val.getDefiningOp();
   assert(defining_op &&
          "lowerIterArgInitializer: init_val must be an op result");
@@ -457,8 +455,8 @@ static LogicalResult lowerIterArgInitializer(
     }
     Location loc = const_op.getLoc();
     Value splat_val = arith::ConstantOp::create(builder, loc, scalar);
-    if (failed(materializeInitialValue(builder, loc, splat_val, alloc_val,
-                                       lanes)))
+    if (failed(
+            materializeInitialValue(builder, loc, splat_val, alloc_val, lanes)))
       return failure();
 
     // Constants are uniqued, so another op may still read this one.
@@ -567,8 +565,7 @@ static void removeUnusedIterArgChain(ArrayRef<BlockArgument> acc_iter_args,
     SmallVector<Value> next_allocs;
 
     for (auto [k, iter_arg] : llvm::enumerate(block_args)) {
-      if (iter_arg.getOwner()->getParentOp() != for_op.getOperation())
-        continue;
+      if (iter_arg.getOwner()->getParentOp() != for_op.getOperation()) continue;
 
       // Block arg 0 of an scf.for is the induction variable; iter_args start
       // at index 1, so subtract 1 to get the iter_arg slot index.
@@ -693,7 +690,8 @@ static LogicalResult rewriteOutputOnlyGeneric(
   // (outside the output-only loop), so the FIFO slice is read once per outer
   // iteration and shared across all inner k-iterations.
   OpBuilder read_builder(orig_read);
-  Value new_fifo_read = ktdf::convertFromTensorToMemref(read_builder, orig_read);
+  Value new_fifo_read =
+      ktdf::convertFromTensorToMemref(read_builder, orig_read);
 
   // --------------------------------------------------------------------------
   // Step 3: For each non-FIFO outs slot, detect spanning vs non-spanning.
@@ -714,11 +712,11 @@ static LogicalResult rewriteOutputOnlyGeneric(
 
   struct OutSlot {
     unsigned out_idx;
-    Value source_val;              // BA feeding the outs (spanning: output-only
-                                   // BA; non-spanning: FIFO BA)
-    tensor::ExtractSliceOp ext_op; // the extract_slice, if any (may be null)
+    Value source_val;  // BA feeding the outs (spanning: output-only
+                       // BA; non-spanning: FIFO BA)
+    tensor::ExtractSliceOp ext_op;  // the extract_slice, if any (may be null)
     bool is_spanning;
-    Value alloc;                   // filled in step 4
+    Value alloc;  // filled in step 4
   };
 
   SmallVector<OutSlot> out_slots;
@@ -765,10 +763,9 @@ static LogicalResult rewriteOutputOnlyGeneric(
     else
       src_tensor_type = cast<RankedTensorType>(
           generic_op.getDpsInitOperand(slot.out_idx)->get().getType());
-    auto alloc_type =
-        MemRefType::get(src_tensor_type.getShape(),
-                        src_tensor_type.getElementType(),
-                        MemRefLayoutAttrInterface{}, mem_space);
+    auto alloc_type = MemRefType::get(src_tensor_type.getShape(),
+                                      src_tensor_type.getElementType(),
+                                      MemRefLayoutAttrInterface{}, mem_space);
     slot.alloc = memref::AllocOp::create(builder, loc, alloc_type).getResult();
   }
 
@@ -786,12 +783,11 @@ static LogicalResult rewriteOutputOnlyGeneric(
       cursor = outermost_init;
     }
     Value seed = outermost_init ? outermost_init : cursor;
-    OpBuilder init_builder(
-        seed.getDefiningOp()
-            ? (stage->isProperAncestor(seed.getDefiningOp())
-                   ? OpBuilder(seed.getDefiningOp())
-                   : builder)
-            : builder);
+    OpBuilder init_builder(seed.getDefiningOp()
+                               ? (stage->isProperAncestor(seed.getDefiningOp())
+                                      ? OpBuilder(seed.getDefiningOp())
+                                      : builder)
+                               : builder);
     if (failed(lowerIterArgInitializer(seed, slot.alloc, generic_op,
                                        init_builder, resource_kinds)))
       return failure();
@@ -815,24 +811,21 @@ static LogicalResult rewriteOutputOnlyGeneric(
       // memref.subview verifier requires source and result to carry the same
       // memory space, so cast the alloc to a no-space type first; the subview
       // result type is then also built without a memory space.
-      auto src_no_space_type =
-          MemRefType::get(src_memref_type.getShape(),
-                          src_memref_type.getElementType(),
-                          src_memref_type.getLayout());
+      auto src_no_space_type = MemRefType::get(src_memref_type.getShape(),
+                                               src_memref_type.getElementType(),
+                                               src_memref_type.getLayout());
       Value src_no_space_val =
           src_memref_type.getMemorySpace()
               ? memref::MemorySpaceCastOp::create(builder, loc,
-                                                  src_no_space_type,
-                                                  slot.alloc)
+                                                  src_no_space_type, slot.alloc)
                     .getResult()
               : slot.alloc;
-      auto sv_result_type =
-          cast<MemRefType>(memref::SubViewOp::inferResultType(
-              src_no_space_type, ext.getMixedOffsets(), ext.getMixedSizes(),
-              ext.getMixedStrides()));
+      auto sv_result_type = cast<MemRefType>(memref::SubViewOp::inferResultType(
+          src_no_space_type, ext.getMixedOffsets(), ext.getMixedSizes(),
+          ext.getMixedStrides()));
       auto subview = memref::SubViewOp::create(
-          builder, loc, sv_result_type, src_no_space_val,
-          ext.getMixedOffsets(), ext.getMixedSizes(), ext.getMixedStrides());
+          builder, loc, sv_result_type, src_no_space_val, ext.getMixedOffsets(),
+          ext.getMixedSizes(), ext.getMixedStrides());
       new_outs[slot.out_idx] = subview.getResult();
     } else {
       new_outs[slot.out_idx] = slot.alloc;
@@ -908,8 +901,8 @@ static LogicalResult rewriteOutputOnlyGeneric(
   // Erase the tensor generic (all results replaced).
   generic_op.erase();
 
-  // Retarget any remaining uses of the old tensor read (e.g. in out_only_loop inits)
-  // to new_fifo_read and erase orig_read before loop rebuilding.
+  // Retarget any remaining uses of the old tensor read (e.g. in out_only_loop
+  // inits) to new_fifo_read and erase orig_read before loop rebuilding.
   if (orig_read) {
     for (OpOperand& use :
          llvm::make_early_inc_range(orig_read.getResult().getUses()))
@@ -921,25 +914,24 @@ static LogicalResult rewriteOutputOnlyGeneric(
   // Step 9: Strip unused iter_args from both the output-only loop and the
   //         enclosing FIFO loop via removeUnusedIterArgChain.
   //
-  //   All iter_args of the output-only loop (including any FIFO iter_args created
-  //   by tileLinalgOp) are passed in ONE call so that the loop is rebuilt
-  //   exactly once without iter_args. Walking the chain further (from each
-  //   init) rebuilds the FIFO loop with all dropped slots.
+  //   All iter_args of the output-only loop (including any FIFO iter_args
+  //   created by tileLinalgOp) are passed in ONE call so that the loop is
+  //   rebuilt exactly once without iter_args. Walking the chain further (from
+  //   each init) rebuilds the FIFO loop with all dropped slots.
   // --------------------------------------------------------------------------
 
   // Erase spanning extract_slice ops (must be done before RAUW of their source
   // BAs so they don't see alloc operands during the rebuild).
   for (auto& slot : out_slots) {
-    if (slot.ext_op && slot.ext_op->use_empty())
-      slot.ext_op.erase();
+    if (slot.ext_op && slot.ext_op->use_empty()) slot.ext_op.erase();
   }
 
   // Collect ALL output-only loop iter_args in iter_arg order.
   SmallVector<BlockArgument> all_out_only_bas;
   SmallVector<Value> all_out_only_allocs;
 
-  for (auto [ba, init] : llvm::zip(out_only_loop.getRegionIterArgs(),
-                                   out_only_loop.getInits())) {
+  for (auto [ba, init] :
+       llvm::zip(out_only_loop.getRegionIterArgs(), out_only_loop.getInits())) {
     Value alloc_val = nullptr;
     for (auto& slot : out_slots) {
       if (slot.is_spanning && slot.source_val == Value(ba)) {
@@ -951,10 +943,9 @@ static LogicalResult rewriteOutputOnlyGeneric(
         break;
       }
     }
-    // If not matching a non-FIFO out_slot (e.g. the FIFO data iter_arg created by
-    // tileLinalgOp), use new_fifo_read as the replacement value.
-    if (!alloc_val)
-      alloc_val = new_fifo_read;
+    // If not matching a non-FIFO out_slot (e.g. the FIFO data iter_arg created
+    // by tileLinalgOp), use new_fifo_read as the replacement value.
+    if (!alloc_val) alloc_val = new_fifo_read;
 
     all_out_only_bas.push_back(ba);
     all_out_only_allocs.push_back(alloc_val);
@@ -990,8 +981,8 @@ static LogicalResult rewriteGeneric(
 
   // One accumulator per loop-carried output: a compute that accumulates more
   // than one thing has one of each, and each is buffered on its own.  The
-  // outputs that are not iter_args (e.g. the FIFO data operand of a generic with
-  // no ins()) are not accumulators and are left alone.
+  // outputs that are not iter_args (e.g. the FIFO data operand of a generic
+  // with no ins()) are not accumulators and are left alone.
   const SmallVector<unsigned> acc_out_idx =
       ktdf::getIterArgOutputIndices(generic_op);
   const unsigned accumulators = static_cast<unsigned>(acc_out_idx.size());
@@ -1046,7 +1037,8 @@ static LogicalResult rewriteGeneric(
         (outermost_inits[r].getDefiningOp() &&
          stage->isProperAncestor(outermost_inits[r].getDefiningOp()))
             ? OpBuilder(outermost_inits[r].getDefiningOp())
-            : (outermost_for ? OpBuilder(outermost_for) : OpBuilder(generic_op));
+            : (outermost_for ? OpBuilder(outermost_for)
+                             : OpBuilder(generic_op));
     if (failed(lowerIterArgInitializer(outermost_inits[r], allocs[r],
                                        generic_op, init_builder,
                                        resource_kinds)))
@@ -1074,9 +1066,9 @@ static LogicalResult rewriteGeneric(
   // iter_arg slots.
   const unsigned num_ins = generic_op.getInputs().size();
   if (num_ins > 0) {
-    ktdf::cloneLinalgGenericAsBufferOp(
-        builder, generic_op, /*inputs=*/ValueRange{new_read},
-        /*outputs=*/allocs);
+    ktdf::cloneLinalgGenericAsBufferOp(builder, generic_op,
+                                       /*inputs=*/ValueRange{new_read},
+                                       /*outputs=*/allocs);
   } else {
     SmallVector<Value> new_outs(generic_op.getOutputs());
     new_outs[*fifo_idx - num_ins] = new_read;
@@ -1332,10 +1324,10 @@ static Operation* findLastAccumulatorInit(Value acc, Block* block) {
 // set when `acc` is a copy of the fifo data rather than an outer-dim
 // accumulator.
 // ---------------------------------------------------------------------------
-static LogicalResult lowerInnerDimInit(Value init, Value acc,
-                                       memref::SubViewOp lane_like,
-                                       linalg::GenericOp combiner,
-                                       bool acc_from_fifo) {
+static LogicalResult lowerInnerDimInit(
+    Value init, Value acc, memref::SubViewOp lane_like,
+    linalg::GenericOp combiner, bool acc_from_fifo,
+    const mlir::ktdf_arch::ResourceKinds& resource_kinds) {
   if (auto empty_op = init.getDefiningOp<tensor::EmptyOp>()) {
     if (empty_op->use_empty()) empty_op->erase();
     return success();
@@ -1391,7 +1383,8 @@ static LogicalResult lowerInnerDimInit(Value init, Value acc,
         "of the outer-dim reduction");
   }
   if_op->moveAfter(lane);
-  return lowerIterArgInitializer(init, lane.getResult(), combiner);
+  return lowerIterArgInitializer(init, lane.getResult(), combiner, builder,
+                                 resource_kinds);
 }
 
 // ---------------------------------------------------------------------------
@@ -1472,7 +1465,8 @@ static void widenFifoUses(Value fifo_slot, ArrayRef<int64_t> new_shape,
 // ---------------------------------------------------------------------------
 static LogicalResult rewriteInnerDimGeneric(
     linalg::GenericOp generic_op,
-    scheduler::arch_view::GroupLocalMemory& group_local_mem) {
+    scheduler::arch_view::GroupLocalMemory& group_local_mem,
+    const mlir::ktdf_arch::ResourceKinds& resource_kinds) {
   auto stage = generic_op->getParentOfType<ktdf::StageOp>();
   assert(stage && "expected enclosing ktdf.stage");
 
@@ -1644,9 +1638,9 @@ static LogicalResult rewriteInnerDimGeneric(
   SmallVector<Value> orig_out_inits(generic_op.getOutputs());
   generic_op.erase();
   for (auto [r, init] : llvm::enumerate(orig_out_inits)) {
-    if (failed(lowerInnerDimInit(init, effective[r],
-                                 subviews[r].getDefiningOp<memref::SubViewOp>(),
-                                 buffer_generic, acc_from_fifo)))
+    if (failed(lowerInnerDimInit(
+            init, effective[r], subviews[r].getDefiningOp<memref::SubViewOp>(),
+            buffer_generic, acc_from_fifo, resource_kinds)))
       return failure();
   }
 
@@ -1680,15 +1674,16 @@ struct MapReductionPartialsPass
     // Collect generics in three buckets.
     //
     //   output_only  — cloned generics inside a {ktdf.output_only_loop} nest
-    //                  (produced by ReductionLoopExposure for output-only dims).
-    //                  Processed first: they may be nested inside the same
-    //                  FIFO-driven scf.for that carries loop_exposed generics,
-    //                  so their iter_args must be stripped before the outer
-    //                  loop_exposed pass touches the loop.
+    //                  (produced by ReductionLoopExposure for output-only
+    //                  dims). Processed first: they may be nested inside the
+    //                  same FIFO-driven scf.for that carries loop_exposed
+    //                  generics, so their iter_args must be stripped before the
+    //                  outer loop_exposed pass touches the loop.
     //   loop_exposed — outer-dim generics (outs are FIFO-loop iter_args).
     //                  Their loop results are RAUW'd to alloc memrefs before
     //                  inner_dim generics are processed.
-    //   inner_dim    — inner-dim generics (produced by SplitReductionInnerOuter).
+    //   inner_dim    — inner-dim generics (produced by
+    //   SplitReductionInnerOuter).
     SmallVector<linalg::GenericOp> output_only, loop_exposed, inner_dim;
     module.walk([&](linalg::GenericOp generic_op) {
       // FIXME: Current implementation leads to invalid IR when processing
@@ -1723,7 +1718,7 @@ struct MapReductionPartialsPass
     // Process output-only generics first.
     for (auto generic_op : output_only) {
       if (failed(rewriteOutputOnlyGeneric(generic_op, group_local_mem,
-                                    resource_kinds))) {
+                                          resource_kinds))) {
         signalPassFailure();
         return;
       }
@@ -1746,8 +1741,7 @@ struct MapReductionPartialsPass
           res.replaceAllUsesWith(operand);
       }
 
-      if (failed(rewriteGeneric(generic_op, group_local_mem,
-                                    resource_kinds))) {
+      if (failed(rewriteGeneric(generic_op, group_local_mem, resource_kinds))) {
         signalPassFailure();
         return;
       }
@@ -1800,7 +1794,8 @@ struct MapReductionPartialsPass
       }
 
       // Transform inner-dim generic into memref-typed generic.
-      if (failed(rewriteInnerDimGeneric(generic_op, group_local_mem))) {
+      if (failed(rewriteInnerDimGeneric(generic_op, group_local_mem,
+                                        resource_kinds))) {
         signalPassFailure();
         return;
       }

@@ -718,7 +718,8 @@ struct ReductionLoopExposurePass
     // For non-contiguous reduction dims (e.g. [0, 2] of [d0, d1, d2]) both
     // axes independently become 1, e.g. [1, d1, 1].
     auto slice_tensor_type = cast<RankedTensorType>(
-        getFifoInOperand(generic_op, *findFifoInOperandIdx(generic_op)).getType());
+        getFifoInOperand(generic_op, *findFifoInOperandIdx(generic_op))
+            .getType());
     SmallVector<int64_t> slice_shape(slice_tensor_type.getShape().begin(),
                                      slice_tensor_type.getShape().end());
     for (int64_t input_dim : input_dims)
@@ -991,12 +992,11 @@ struct ReductionLoopExposurePass
   //   ktdf.write_to_fifo %r0_result_final, fifo_out
   // -------------------------------------------------------------------------
   LogicalResult rewriteComputeStage(
-      IRRewriter& rewriter, Location loc, MLIRContext* ctx,
-      ktdf::StageOp stage, linalg::GenericOp generic_op,
-      RankedTensorType one_row_tensor_type, Value fifo_in,
-      ArrayRef<Value> fifo_outs, Value fifo_in_partial, Value is_first_chunk,
-      ArrayRef<int64_t> dim_sizes, Value start, Value step,
-      ArrayRef<int64_t> output_only_reduction_dims = {},
+      IRRewriter& rewriter, Location loc, MLIRContext* ctx, ktdf::StageOp stage,
+      linalg::GenericOp generic_op, RankedTensorType one_row_tensor_type,
+      Value fifo_in, ArrayRef<Value> fifo_outs, Value fifo_in_partial,
+      Value is_first_chunk, ArrayRef<int64_t> dim_sizes, Value start,
+      Value step, ArrayRef<int64_t> output_only_reduction_dims = {},
       ArrayRef<int64_t> output_only_dim_sizes = {}) {
     Block* body = stage.getBody();
 
@@ -1043,7 +1043,8 @@ struct ReductionLoopExposurePass
         continue;
       }
       auto out_type = cast<RankedTensorType>(init.getType());
-      seeds.push_back(tensor::EmptyOp::create(rewriter, loc, out_type.getShape(),
+      seeds.push_back(tensor::EmptyOp::create(rewriter, loc,
+                                              out_type.getShape(),
                                               out_type.getElementType())
                           .getResult());
     }
@@ -1098,8 +1099,7 @@ struct ReductionLoopExposurePass
           body_builder.clone(*generic_op.getOperation(), mapping));
       if (fifo_in_is_out)
         new_generic.getResult(fifo_in_result).setType(one_row_tensor_type);
-      for (unsigned r : carried)
-        final_results[r] = new_generic.getResult(r);
+      for (unsigned r : carried) final_results[r] = new_generic.getResult(r);
     } else {
       // Output-only dims present: tile the generic with tile_size = 1 for
       // output-only reduction dims using mlir::linalg::tileLinalgOp.
@@ -1114,8 +1114,7 @@ struct ReductionLoopExposurePass
         cloned_generic.getResult(fifo_in_result).setType(one_row_tensor_type);
 
       SmallVector<int64_t> tile_sizes(cloned_generic.getNumLoops(), 0);
-      for (int64_t dim : output_only_reduction_dims)
-        tile_sizes[dim] = 1;
+      for (int64_t dim : output_only_reduction_dims) tile_sizes[dim] = 1;
 
       linalg::LinalgTilingOptions tiling_options;
       tiling_options.setTileSizes(tile_sizes);
@@ -1131,8 +1130,8 @@ struct ReductionLoopExposurePass
 
       // Annotate created loops with reduction and output-only loop attributes.
       for (Operation* loop_op : maybe_tiling->loops) {
-        loop_op->setAttr("loop_type",
-                         ktdf::LoopTypeAttr::get(ctx, ktdf::LoopType::ReductionLoop));
+        loop_op->setAttr("loop_type", ktdf::LoopTypeAttr::get(
+                                          ctx, ktdf::LoopType::ReductionLoop));
         loop_op->setAttr("ktdf.output_only_loop", UnitAttr::get(ctx));
       }
 
@@ -1175,9 +1174,10 @@ struct ReductionLoopExposurePass
       }
 
       // Restore the FIFO operand of the tiled generic to slice.getResult()
-      // directly. tileLinalgOp treated outs operands as loop-carried destinations
-      // and generated extract_slice from loop iter_args, but the FIFO slice is
-      // constant across all k-iterations and fed directly by read_from_fifo.
+      // directly. tileLinalgOp treated outs operands as loop-carried
+      // destinations and generated extract_slice from loop iter_args, but the
+      // FIFO slice is constant across all k-iterations and fed directly by
+      // read_from_fifo.
       if (fifo_in_is_out) {
         Value old_init =
             maybe_tiling->op.getDpsInitOperand(fifo_in_result)->get();
@@ -1225,9 +1225,9 @@ struct ReductionLoopExposurePass
       // Results without a FIFO slot stay loop-carried.
       for (unsigned r : carried) {
         if (!fifo_outs[r]) continue;
-        ktdf::WriteToFifoOp::create(rewriter, loc,
-                                    nested.outermost_loop.getResult(carry_idx[r]),
-                                    fifo_outs[r]);
+        ktdf::WriteToFifoOp::create(
+            rewriter, loc, nested.outermost_loop.getResult(carry_idx[r]),
+            fifo_outs[r]);
       }
     } else {
       // The generic's result feeds other ops (e.g. a downstream inner-dim

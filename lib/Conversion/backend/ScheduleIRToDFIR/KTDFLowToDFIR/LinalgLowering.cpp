@@ -314,9 +314,7 @@ struct LowerLinalgGenericPattern
 
   /// Whether \p operand is a fifo read, or the vector that read was replaced
   /// by: a value rather than a buffer.
-  static bool isFifoFed(mlir::Value operand) {
-    return isFifoValue(operand);
-  }
+  static bool isFifoFed(mlir::Value operand) { return isFifoValue(operand); }
 
   // Lowers a linalg.generic with buffer semantics (memref init operand).
   // The resulting accumulated vector is written back to the output buffer via
@@ -798,12 +796,13 @@ struct LowerLinalgGenericPattern
 
     for (mlir::Value* operand : {&lhs, &rhs}) {
       if (llvm::isa<mlir::ShapedType>(operand->getType())) continue;
-      const auto splat = splatScalarConstant(rewriter, op->getLoc(), *operand,
-                                             vector_type);
+      const auto splat =
+          splatScalarConstant(rewriter, op->getLoc(), *operand, vector_type);
       if (!splat) {
         return rewriter.notifyMatchFailure(
-            op, "scalar operand is not a constant of the vector's element "
-                "type");
+            op,
+            "scalar operand is not a constant of the vector's element "
+            "type");
       }
       *operand = *splat;
     }
