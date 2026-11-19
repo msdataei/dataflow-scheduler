@@ -71,14 +71,14 @@ namespace mlir::ktdf {
 // without a diagnostic, so that each caller reports it in its own terms (or,
 // for a pattern constraint, just does not match).
 // ---------------------------------------------------------------------------
-FailureOr<SmallVector<unsigned>> findInnerDimLoopDims(
+FailureOr<SmallVector<unsigned>> findReductionSimdLaneDims(
     linalg::GenericOp generic_op, int64_t simd_lane_elements);
 
 // ---------------------------------------------------------------------------
 // As above, with the SIMD lane sized by `compute`: as many elements of the
 // first input as `compute` has vector lanes for.
 // ---------------------------------------------------------------------------
-FailureOr<SmallVector<unsigned>> findInnerDimLoopDims(
+FailureOr<SmallVector<unsigned>> findReductionSimdLaneDims(
     linalg::GenericOp generic_op, ktdf_arch::ExecutionUnitOp compute);
 
 // ---------------------------------------------------------------------------

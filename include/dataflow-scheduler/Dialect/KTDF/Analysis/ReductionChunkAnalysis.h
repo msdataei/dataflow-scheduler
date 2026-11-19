@@ -105,7 +105,7 @@ std::optional<ReductionChunkResult> analyzeReductionChunks(
 /// \param reduction_dims  Chunkable reduction loop dims, outermost first.
 ///                        Dynamic dimensions are skipped.
 /// \param simd_lane_dims   The loop dims behind the trailing input axes that
-///                        hold one SIMD lane (see findInnerDimLoopDims).
+///                        hold one SIMD lane (see findReductionSimdLaneDims).
 /// \param chunk_size      The chunk count to distribute (must be ≥ 1).
 std::optional<llvm::SmallVector<int64_t>> computeChunkDims(
     linalg::GenericOp generic_op, llvm::ArrayRef<unsigned> reduction_dims,
