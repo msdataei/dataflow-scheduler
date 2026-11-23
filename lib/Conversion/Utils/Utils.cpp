@@ -210,14 +210,13 @@ mlir::Value emitShuffle(mlir::OpBuilder& builder, mlir::Location loc,
 
 }  // namespace
 
-mlir::Value emitSubSimdSplatShuffle(mlir::OpBuilder& builder,
-                                    mlir::Location loc, mlir::Value src_vec,
-                                    int64_t group_elements) {
+mlir::Value emitSliceSplatShuffle(mlir::OpBuilder& builder, mlir::Location loc,
+                                  mlir::Value src_vec, int64_t group_elements) {
   auto vec_type = mlir::cast<mlir::VectorType>(src_vec.getType());
   const int64_t lanes = vec_type.getNumElements();
-  assert(group_elements > 0 && "sub-SIMD group width must be positive");
+  assert(group_elements > 0 && "slice width must be positive");
   assert(lanes % group_elements == 0 &&
-         "sub-SIMD group width must divide the vector width");
+         "slice width must divide the vector width");
 
   // A single-lane group is already uniform, so there is nothing to spread.
   if (group_elements == 1) return src_vec;

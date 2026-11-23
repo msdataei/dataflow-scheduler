@@ -88,15 +88,14 @@ void emitVectorStore(mlir::OpBuilder& builder, mlir::Location loc,
 ///
 /// Emitted as indices [0, 0, ..., 0] of length `group_elements` repeated
 /// `lanes / group_elements` times, which is what a compute unit declaring
-/// `shuffle_modes = { FirstSubSimdLaneToEachSubSimd }` performs.
+/// `shuffle_modes = { FirstLaneToEachLaneInSlice }` performs.
 ///
 /// `group_elements` must be positive and must divide the vector width evenly;
 /// callers are expected to have validated (and diagnosed) that beforehand.
 /// Returns `src_vec` unchanged when `group_elements` is 1, since then every
 /// group is already a single lane.
-mlir::Value emitSubSimdSplatShuffle(mlir::OpBuilder& builder,
-                                    mlir::Location loc, mlir::Value src_vec,
-                                    int64_t group_elements);
+mlir::Value emitSliceSplatShuffle(mlir::OpBuilder& builder, mlir::Location loc,
+                                  mlir::Value src_vec, int64_t group_elements);
 
 /// Create a vectorchain.shuffle that broadcasts `src_vec` to a
 /// `dst_elements`-wide vector by repeating it end to end, i.e. indices

@@ -1,7 +1,7 @@
 // RUN: dataflow-scheduler-opt --splat-legalization %s | FileCheck %s
 
 // Verify that SplatLegalizationPass legalizes a splat load to the arch's access
-// granularity and marks the reads a sub-SIMD splat still has to finish.
+// granularity and marks the reads a slice splat still has to finish.
 //
 // === f32 case ===
 // L1LU word_size=1 byte, access_granularity for "L1": [64, 8, 2] words.
@@ -34,7 +34,7 @@ ktdf_arch.device @sample_device attributes {mem_space_mapping = #ktdf_arch.map<"
 // CHECK:       %[[R0:.*]] = ktdf.read_from_fifo %{{.*}}#0
 // CHECK-SAME:    -> tensor<1x1x32xf32>
 // CHECK:       %[[R1:.*]] = ktdf.read_from_fifo %{{.*}}#1
-// CHECK-SAME:    {splat = #ktdf.splat<first_subsimd_lane_to_each_subsimd>}
+// CHECK-SAME:    {splat = #ktdf.splat<first_lane_to_each_lane_in_slice>}
 // CHECK-SAME:    -> tensor<1x1x32xf32>
 
 // The generic is untouched: still tensors, still the map legalization left.
@@ -111,7 +111,7 @@ module {
 // Source size unchanged.
 // CHECK:       ktdf.data_transfer from %{{.*}}[0, 0, 0] size [1, 1, 1] to
 // CHECK-SAME:    transfer_mode = #ktdf.transfer_mode<splat>
-// The load already splats a whole vector, so no sub-SIMD step is left over and
+// The load already splats a whole vector, so no slice step is left over and
 // there is no shuffle to name.
 // CHECK-NOT:   splat = #ktdf.splat
 // CHECK:       linalg.generic

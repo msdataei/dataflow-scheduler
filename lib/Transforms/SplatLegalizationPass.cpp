@@ -18,20 +18,20 @@
 //
 // SplatLegalization: validate splat data_transfer loads against the load
 // unit's SIMD capabilities, widen the load to the arch's access granularity
-// when required, and annotate consuming read_from_fifo ops with the sub-SIMD
+// when required, and annotate consuming read_from_fifo ops with the slice
 // shuffle mode that closes the gap.
 //
 // Problem this pass addresses: A load unit that cannot splat a single element
 // at its access granularity loads the whole granule instead, which leaves one
-// live element per sub-SIMD group rather than one for the whole vector.
+// live element per slice rather than one for the whole vector.
 //
 // This pass's responsibilities are:
 //   1. Validate that the load unit's SIMD feature declares splat capability.
 //   2. Widen the innermost static_source_sizes dimension to the hardware's
 //      access granularity when it exceeds the requested element count.
 //   3. Annotate each consuming ktdf.read_from_fifo with
-//      #ktdf.splat<first_subsimd_lane_to_each_subsimd> when widening occurred,
-//      naming the sub-SIMD broadcast shuffle the lowering to DFIR will emit.
+//      #ktdf.splat<first_lane_to_each_lane_in_slice> when widening occurred,
+//      naming the slice broadcast shuffle the lowering to DFIR will emit.
 //
 //===----------------------------------------------------------------------===//
 
@@ -191,16 +191,16 @@ mlir::LogicalResult legalizeSplatTransfer(
   // straight off the transfer and no extra attribute is needed for it.
   mlir::ktdf::setInnermostStaticSourceSize(rewriter, transfer, load_elements);
 
-  // A legalized load leaves one live element per sub-SIMD group rather than
+  // A legalized load leaves one live element per slice rather than
   // one for the whole vector.  Name the shuffle that closes that gap on every
   // read of the slot; the lowering to DFIR emits it right after the receive,
-  // with the group width coming from the compute unit's sub_simd_lanes.
+  // with the group width coming from the compute unit's lanes_per_slice.
   mlir::Value fifo_slot = transfer.getDestination();
   for (mlir::Operation* user : fifo_slot.getUsers()) {
     auto read_op = mlir::dyn_cast<mlir::ktdf::ReadFromFifoOp>(user);
     if (read_op && read_op.getFifoSlot() == fifo_slot) {
       rewriter.modifyOpInPlace(read_op, [&] {
-        read_op.setSplat(mlir::ktdf::SplatMode::FirstSubSimdLaneToEachSubSimd);
+        read_op.setSplat(mlir::ktdf::SplatMode::FirstLaneToEachLaneInSlice);
       });
     }
   }

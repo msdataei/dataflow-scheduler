@@ -17,9 +17,9 @@
 //   (src_static_sizes=[1]) yields effective_sizes=[2] with the same logic.
 //
 // Receive side — the shuffle the splat mode names.  A widened load leaves one
-// live element per sub-SIMD group, so the read SplatLegalizationPass marked lowers
+// live element per slice, so the read SplatLegalizationPass marked lowers
 // to the receive plus a shuffle spreading the first lane of each group across
-// it.  The group width is the compute unit's sub_simd_lanes, which sample_device
+// it.  The group width is the compute unit's lanes_per_slice, which sample_device
 // declares as 4 for f32, so four zero indices repeat eight times over the 32
 // lanes.
 //
@@ -45,7 +45,7 @@
 // CHECK-NEXT:      %{{.*}} = uniform.def_immutable_mapping
 // CHECK-NEXT:      %{{.*}} = uniform.query_map
 // CHECK-NEXT:      dataflow.send %{{.*}}, %[[SEND_SHUF]] : vector<32xf32>
-// --- compute-unit program_unit: the receive and the sub-SIMD shuffle ---
+// --- compute-unit program_unit: the receive and the slice shuffle ---
 // CHECK:       dataflow.program_unit iter_arg : %[[ITER_C:.+]] -> (%[[V0]], %[[V1]]) :
 // CHECK:         scf.for
 // CHECK:           %{{.*}} = uniform.def_immutable_mapping

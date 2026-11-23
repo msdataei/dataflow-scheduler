@@ -369,7 +369,7 @@ def IndirectAddrBufFillLegalizationPass
 }
 
 def SplatLegalizationPass : Pass<"splat-legalization", "mlir::ModuleOp"> {
-  let summary = "Validate splat loads, widen to access granularity, and name the sub-SIMD shuffle";
+  let summary = "Validate splat loads, widen to access granularity, and name the slice shuffle";
   let description = [{
     Runs after access-granularity-legalization. For each ktdf.data_transfer
     with a splat transfer mode whose destination is a FIFO:
@@ -383,16 +383,16 @@ def SplatLegalizationPass : Pass<"splat-legalization", "mlir::ModuleOp"> {
          innermost static_source_sizes dimension to it.  The size operand
          carries the load width, so no attribute is emitted for it.
       4. In that same case, sets
-         splat = #ktdf.splat<first_subsimd_lane_to_each_subsimd> on each
+         splat = #ktdf.splat<first_lane_to_each_lane_in_slice> on each
          consuming ktdf.read_from_fifo.
 
     A legalized load splats the granule it read, not the single element: every
-    sub-SIMD group ends up holding one live element instead of the whole vector
+    slice ends up holding one live element instead of the whole vector
     holding one.  The splat mode says so, and names the shuffle that closes the
     gap; it is the pass's durable output.
 
     The shuffle itself is emitted by the lowering to DFIR, which reads the group
-    width off the compute unit's sub_simd_lanes.  This pass queries the arch for
+    width off the compute unit's lanes_per_slice.  This pass queries the arch for
     the load width and nothing else.  Splat placement (ensuring the splat lands
     on the terminal FIFO load) is the responsibility of path expansion upstream.
   }];

@@ -121,8 +121,8 @@ struct LowerReadFromFifoPattern
       auto compute = resource_kinds_.getDefaultCompute();
       if (!compute) {
         read_op.emitError(
-            "a sub-SIMD splat needs the device to declare a default compute "
-            "unit to read the sub-SIMD group width off");
+            "a slice splat needs the device to declare a default compute "
+            "unit to read the slice width off");
         return mlir::failure();
       }
       auto splatted = emitSplatMode(rewriter, read_op, *read_op.getSplat(),
@@ -143,36 +143,36 @@ struct LowerReadFromFifoPattern
   /// Emit the shuffle `mode` names over `received`, and return its result.
   ///
   /// The width it works over is an arch fact, not the device file's to repeat:
-  /// a sub-SIMD group is as wide as the compute unit declares in
-  /// `ktdf_arch.feature.simd = { sub_simd_lanes = ... }`.
+  /// a slice is as wide as the compute unit declares in
+  /// `ktdf_arch.feature.simd = { lanes_per_slice = ... }`.
   static mlir::FailureOr<mlir::Value> emitSplatMode(
       mlir::PatternRewriter& rewriter, mlir::ktdf::ReadFromFifoOp read_op,
       mlir::ktdf::SplatMode mode, mlir::Value received,
       mlir::ktdf_arch::ExecutionUnitOp compute) {
     auto vector_type = mlir::cast<mlir::VectorType>(received.getType());
     switch (mode) {
-      case mlir::ktdf::SplatMode::FirstSubSimdLaneToEachSubSimd: {
+      case mlir::ktdf::SplatMode::FirstLaneToEachLaneInSlice: {
         const int64_t group =
             compute.getFeature<mlir::ktdf_arch::feature::SIMD>()
-                .getSubSimdLanes(vector_type.getElementType());
+                .getLanesPerSlice(vector_type.getElementType());
         if (group <= 0) {
           return read_op.emitError(
-              "a sub-SIMD splat needs the compute unit to declare "
-              "ktdf_arch.feature.simd = { sub_simd_lanes = ... } for this "
+              "a slice splat needs the compute unit to declare "
+              "ktdf_arch.feature.simd = { lanes_per_slice = ... } for this "
               "element type");
         }
-        // Each sub-SIMD group splats its first element to all other lanes in
-        // the group. For this to be well-defined, every sub-SIMD group must
+        // Each slice splats its first element to all other lanes in
+        // the slice. For this to be well-defined, every slice must
         // have a first element — i.e. the data received through the FIFO
         // (vector_type.getNumElements() lanes) must be evenly divisible by
-        // the sub-SIMD group width.
+        // the slice width.
         if (vector_type.getNumElements() % group != 0) {
-          return read_op.emitError("sub-SIMD group width ")
+          return read_op.emitError("slice width ")
                  << group << " does not divide the "
                  << vector_type.getNumElements() << " lanes received";
         }
-        return emitSubSimdSplatShuffle(rewriter, read_op.getLoc(), received,
-                                       group);
+        return emitSliceSplatShuffle(rewriter, read_op.getLoc(), received,
+                                     group);
       }
     }
     llvm_unreachable("unhandled ktdf::SplatMode");

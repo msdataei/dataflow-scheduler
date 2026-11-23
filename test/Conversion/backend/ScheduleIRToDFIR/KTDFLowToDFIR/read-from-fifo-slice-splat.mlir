@@ -4,18 +4,18 @@
 // receive plus the shuffle the mode names.
 //
 // The mode says the load unit widened the load to its access granularity, so
-// only the first lane of every sub-SIMD group holds a live element. The shuffle
+// only the first lane of every slice holds a live element. The shuffle
 // spreads that lane across its group, which is what a compute unit declaring
-// shuffle_modes = { FirstSubSimdLaneToEachSubSimd } performs.
+// shuffle_modes = { FirstLaneToEachLaneInSlice } performs.
 //
 // The group width comes from the compute unit's arch declaration, not from the
 // op: sample_device's compute unit declares lanes f16 = 64 and
-// sub_simd_lanes f16 = 8, so the shuffle repeats eight zero indices eight times.
+// lanes_per_slice f16 = 8, so the shuffle repeats eight zero indices eight times.
 //
 // The memref.copy that follows stores the shuffled vector into the register
 // buffer, the same way it stores a plain read.
 
-// CHECK-LABEL: func.func @read_from_fifo_subsimd_splat
+// CHECK-LABEL: func.func @read_from_fifo_slice_splat
 // CHECK:         dataflow.program_unit
 // CHECK:           %[[RECV:.+]] = dataflow.receive
 // CHECK-NEXT:      %[[SPLAT:.+]] = vectorchain.shuffle input(%[[RECV]]
@@ -27,7 +27,7 @@
 module {
   ktdf_arch.device @sample_device attributes {} import("../../../../Dialect/KTDFArch/sample_device.mlir")
 
-  func.func @read_from_fifo_subsimd_splat() attributes {grid = [1]} {
+  func.func @read_from_fifo_slice_splat() attributes {grid = [1]} {
     %l1lu = dataflow.get_unit {core = 0 : i32, name = "C0-L1LU", type = "L1LU"} : index
     %sfu  = dataflow.get_unit {core = 0 : i32, name = "C0-SFU",  type = "SFU"}  : index
     %tile_id = ktdp.get_compute_tile_id : index
@@ -49,12 +49,12 @@ module {
         : memref<1x2xf16, "L1">, !ktdf.fifo.slot<"L1LU" -> "SFU", 64xf16>
     }
 
-    // Consumer: the read owes the sub-SIMD shuffle, and the copy moves the
+    // Consumer: the read owes the slice shuffle, and the copy moves the
     // result into a register buffer.
     ktdf_lowering.execute_on %u_sfu {
       %reg = memref.alloc() : memref<1x64xf16, "SFU_REG">
       %read = ktdf.read_from_fifo %fifo
-        {splat = #ktdf.splat<first_subsimd_lane_to_each_subsimd>}
+        {splat = #ktdf.splat<first_lane_to_each_lane_in_slice>}
         : !ktdf.fifo.slot<"L1LU" -> "SFU", 64xf16> -> memref<1x64xf16>
       memref.copy %read, %reg : memref<1x64xf16> to memref<1x64xf16, "SFU_REG">
     }

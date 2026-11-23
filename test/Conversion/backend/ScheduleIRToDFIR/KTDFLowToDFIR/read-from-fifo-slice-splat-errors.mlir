@@ -4,7 +4,7 @@
 // width that does not divide what arrives would make the shuffle drop lanes, so
 // it is a diagnostic rather than a best effort.
 //
-// sample_device's SFU declares sub_simd_lanes f16 = 8, and this slot carries 4
+// sample_device's SFU declares lanes_per_slice f16 = 8, and this slot carries 4
 // lanes.
 
 module {
@@ -34,9 +34,9 @@ module {
 
     ktdf_lowering.execute_on %u_sfu {
       %reg = memref.alloc() : memref<1x4xf16, "SFU_REG">
-      // expected-error @below {{sub-SIMD group width 8 does not divide the 4 lanes received}}
+      // expected-error @below {{slice width 8 does not divide the 4 lanes received}}
       %read = ktdf.read_from_fifo %fifo
-        {splat = #ktdf.splat<first_subsimd_lane_to_each_subsimd>}
+        {splat = #ktdf.splat<first_lane_to_each_lane_in_slice>}
         : !ktdf.fifo.slot<"L1LU" -> "SFU", 4xf16> -> memref<1x4xf16>
       memref.copy %read, %reg : memref<1x4xf16> to memref<1x4xf16, "SFU_REG">
     }

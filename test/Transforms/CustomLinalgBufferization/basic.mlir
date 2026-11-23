@@ -124,7 +124,7 @@ module {
         %r0 = ktdf.read_from_fifo %slots#0
           : <"L1LU" -> "SFU", 32xf32> -> tensor<1x1x32xf32>
         %r1 = ktdf.read_from_fifo %slots#1
-          {splat = #ktdf.splat<first_subsimd_lane_to_each_subsimd>}
+          {splat = #ktdf.splat<first_lane_to_each_lane_in_slice>}
           : <"L1LU" -> "SFU", 32xf32> -> memref<1x1x32xf32>
         %reg = memref.alloc() : memref<1x1x32xf32, "SFU_REG">
         memref.copy %r1, %reg
