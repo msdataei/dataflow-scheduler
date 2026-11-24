@@ -341,8 +341,8 @@ class PatternCache : public mlir::ktdf_arch::PatternCache {
   void registerNativeFunctions(mlir::PDLPatternModule& patterns) final {
     mlir::ktdf_arch::PatternCache::registerNativeFunctions(patterns);
 
-    const auto compute =
-        mlir::ktdf_arch::ResourceKinds(getDevice()).getDefaultCompute();
+    const auto compute = mlir::ktdf::findDefaultComputeUnit(
+        mlir::ktdf_arch::ResourceKinds(getDevice()));
     patterns.registerConstraintFunction(
         "ktdf.is_simd_lane_reduction",
         [compute](mlir::PatternRewriter& /*rewriter*/, mlir::Operation* op) {

@@ -91,10 +91,26 @@ ktdf_arch::ExecutionUnitOp getDefaultComputeUnit(
     const ktdf_arch::DefaultDevice& device) {
   if (!device) return {};
   ktdf_arch::Mapping mapping(device.getRef());
-  ktdf_arch::ExecutionUnitOp compute = mapping.byKind().getDefaultCompute();
+  ktdf_arch::ExecutionUnitOp compute = findDefaultComputeUnit(mapping.byKind());
   if (!compute)
     mapping.getDevice().getDeclaration().emitError(
         "no (unambiguous) default compute resource");
+  return compute;
+}
+
+// ---------------------------------------------------------------------------
+// findDefaultComputeUnit
+// ---------------------------------------------------------------------------
+ktdf_arch::ExecutionUnitOp findDefaultComputeUnit(
+    const ktdf_arch::ResourceKinds& kinds) {
+  ktdf_arch::ExecutionUnitOp compute;
+  for (const ktdf_arch::ResourceKinds::Kind& kind : kinds) {
+    auto unit = dyn_cast_if_present<ktdf_arch::ExecutionUnitOp>(
+        kind.getExemplar().getOperation());
+    if (!unit || !unit.getFeature<ktdf_arch::feature::Compute>()) continue;
+    if (compute) return {};
+    compute = unit;
+  }
   return compute;
 }
 

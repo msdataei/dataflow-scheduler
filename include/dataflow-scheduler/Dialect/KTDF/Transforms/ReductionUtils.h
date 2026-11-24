@@ -47,6 +47,7 @@
 
 #include "dataflow-scheduler/Dialect/KTDF/KTDF.h"
 #include "dataflow-scheduler/Dialect/KTDFArch/Analysis/DeviceManager.h"
+#include "dataflow-scheduler/Dialect/KTDFArch/Analysis/ResourceKinds.h"
 #include "llvm/ADT/SmallVector.h"
 #include "mlir/Dialect/Linalg/IR/Linalg.h"
 #include "mlir/IR/AffineMap.h"
@@ -89,6 +90,19 @@ FailureOr<SmallVector<unsigned>> findReductionSimdLaneDims(
 // ---------------------------------------------------------------------------
 ktdf_arch::ExecutionUnitOp getDefaultComputeUnit(
     const ktdf_arch::DefaultDevice& device);
+
+// ---------------------------------------------------------------------------
+// Return the default compute unit among `kinds`: the single exec_unit marked
+// with feature::Compute. Returns null, without a diagnostic, if there is none
+// or more than one.
+//
+// FIXME: Use ResourceKinds::getDefaultCompute once it is safe without a
+//        default compute unit. Its cast_if_present on a `const Resource`
+//        then returns a reference to a temporary, which ASan reports as a
+//        stack-use-after-return.
+// ---------------------------------------------------------------------------
+ktdf_arch::ExecutionUnitOp findDefaultComputeUnit(
+    const ktdf_arch::ResourceKinds& kinds);
 
 // ---------------------------------------------------------------------------
 // Result of StageFactory::buildFifoPrivate.
