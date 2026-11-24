@@ -112,8 +112,8 @@ def SimplifyPipelinePass : Pass<"simplify-pipeline", "mlir::func::FuncOp"> {
   let dependentDialects = ["mlir::ktdf::KTDFDialect"];
 }
 
-def SplitReductionInnerOuterDimPass : Pass<"split-reduction-inner-outer-dim", "mlir::ModuleOp"> {
-  let summary = "Split the inner and outer dimensions of a reduction";
+def SplitSimdLaneReductionPass : Pass<"split-simd-lane-reduction", "mlir::ModuleOp"> {
+  let summary = "Split the SIMD-lane dimensions of a reduction from the outer ones";
   let description = [{
     Walks the module for linalg.generic ops with at least two reduction
     iterators and splits each into two generics: the first reduces the outer
@@ -125,7 +125,7 @@ def SplitReductionInnerOuterDimPass : Pass<"split-reduction-inner-outer-dim", "m
     reduction dimensions are all in the SIMD lane, is left as it is.  SIMD-lane
     dimensions that do not hold exactly one SIMD lane are an error.
   }];
-  let constructor = "::mlir::ktdf::createSplitReductionInnerOuterDimPass()";
+  let constructor = "::mlir::ktdf::createSplitSimdLaneReductionPass()";
   let dependentDialects = [
     "mlir::ktdf::KTDFDialect",
     "mlir::linalg::LinalgDialect",
@@ -154,7 +154,7 @@ def ReductionLoopExposurePass : Pass<"reduction-loop-exposure", "mlir::ModuleOp"
     the previous chunk's partial result into fifo_partial on non-first
     iterations; the pass preserves that scf.if outside the new reduction loop.
 
-    Before (R_i = size of outer reduction dimension i; S = innermost reduction
+    Before (R_i = size of outer reduction dimension i; S = SIMD-lane reduction
     size; C = non-reduction elements):
 
       ktdf.private: [fifo_in(R_0*...*R_n*C*S elements), fifo_out(C*S elements), ...]

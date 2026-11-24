@@ -50,8 +50,8 @@
 //        threads down to the innermost loop where linalg.generic runs.
 //      - When the generic writes to a FIFO directly, write_to_fifo is wrapped
 //        in scf.if (all ivs == last) in the innermost loop body.
-//      - When the generic feeds downstream ops (e.g. an inner-dim reduction
-//        after SplitReductionInnerOuterDim), uses of the original generic are
+//      - When the generic feeds downstream ops (e.g. a SIMD-lane reduction
+//        after SplitSimdLaneReduction), uses of the original generic are
 //        replaced with the outermost loop results.
 //      - The outermost loop is tagged {loop_type = reduction_loop}.
 //   9. Find the conditional-store stage via StageFactory::findStoreStage
@@ -156,9 +156,9 @@ static FailureOr<bool> collectReductionInfo(linalg::GenericOp generic_op,
     return false;
   }
 
-  FailureOr<SmallVector<unsigned>> inner_dims =
+  FailureOr<SmallVector<unsigned>> simd_lane_dims =
       ktdf::findReductionSimdLaneDims(generic_op, compute);
-  if (failed(inner_dims))
+  if (failed(simd_lane_dims))
     return generic_op.emitError(PASS_NAME)
            << ": a SIMD lane whose dims mix reduction and parallel is not "
               "supported";
@@ -172,7 +172,7 @@ static FailureOr<bool> collectReductionInfo(linalg::GenericOp generic_op,
   auto iter_types = generic_op.getIteratorTypesArray();
   for (int64_t i = 0; i < static_cast<int64_t>(iter_types.size()); ++i) {
     if (iter_types[i] != utils::IteratorType::reduction) continue;
-    if (llvm::is_contained(*inner_dims, static_cast<unsigned>(i))) {
+    if (llvm::is_contained(*simd_lane_dims, static_cast<unsigned>(i))) {
       LDBG(1) << PASS_NAME ": skipping SIMD-lane reduction dim " << i;
       continue;
     }
@@ -232,7 +232,7 @@ static FailureOr<bool> collectReductionInfo(linalg::GenericOp generic_op,
 // reduction dims to expose (i.e. collectReductionInfo succeeds for them).
 //
 // Generics whose first input is produced by another linalg.generic are
-// chained inner-dim ops (e.g. G2 after SplitReductionInnerOuterDim) and are
+// chained SIMD-lane ops (e.g. G2 after SplitSimdLaneReduction) and are
 // skipped (their reduction loops should not be exposed).
 //
 // Fails if collectReductionInfo fails for any of them.
@@ -247,7 +247,7 @@ static LogicalResult collectReductionGenericOps(
         if (isa<ktdf::StageOp>(op)) return WalkResult::skip();
         if (auto generic = dyn_cast<linalg::GenericOp>(op)) {
           // Skip chained generics whose input comes from another generic —
-          // those are inner-dim ops left for a later pass.
+          // those are SIMD-lane ops left for a later pass.
           if (generic.getInputs().front().getDefiningOp<linalg::GenericOp>())
             return WalkResult::advance();
           ReductionInfo info;
@@ -673,7 +673,7 @@ struct ReductionLoopExposurePass
     // fifo_out: the fifo_slot operand of the write_to_fifo whose tensor input
     // is directly produced by generic_op (i.e. generic_op.getResult(0) is the
     // first operand of the write_to_fifo).  When the generic feeds another op
-    // first (e.g. a second-stage inner-dim reduction after SplitReduction),
+    // first (e.g. a second-stage SIMD-lane reduction after SplitReduction),
     // this will be null and we take the non-FIFO path in rewriteComputeStage.
     // One per result: a compute reducing a pair writes each half to a slot of
     // its own. All null or all found -- a mix is a shape this does not know.
@@ -1066,7 +1066,7 @@ struct ReductionLoopExposurePass
                                     fifo_outs[r]);
       }
     } else {
-      // The generic's result feeds other ops (e.g. a downstream inner-dim
+      // The generic's result feeds other ops (e.g. a downstream SIMD-lane
       // reduction). Replace all uses of the original generic with the
       // final results.
       for (unsigned r = 0; r < results; ++r) {

@@ -1,4 +1,4 @@
-// RUN: dataflow-scheduler-opt --split-reduction-inner-outer-dim %s | FileCheck %s
+// RUN: dataflow-scheduler-opt --split-simd-lane-reduction %s | FileCheck %s
 
 // A SIMD lane can span more than one input dim. On the sample device a SIMD lane is
 // 64 f16 elements, so for tensor<2x256x32x2xf16> it is the 32x2 of the two

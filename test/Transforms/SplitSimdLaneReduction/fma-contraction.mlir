@@ -1,5 +1,5 @@
 // RUN: dataflow-scheduler-opt --reduction-loop-exposure %s | FileCheck %s
-// RUN: dataflow-scheduler-opt --split-reduction-inner-outer-dim %s | FileCheck %s
+// RUN: dataflow-scheduler-opt --split-simd-lane-reduction %s | FileCheck %s
 // RUN: dataflow-scheduler-opt --map-reduction-partials %s | FileCheck %s
 
 // A contraction whose body is a single math.fma is left alone by the

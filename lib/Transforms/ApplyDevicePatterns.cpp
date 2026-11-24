@@ -67,12 +67,12 @@ namespace {
 
 // Returns success (and no results) when `op` is a linalg.generic whose input
 // axes holding one SIMD lane map to reduction iterators -- i.e. it is the
-// inner-dim reduction generic produced by MapReductionPartials -- and whose
+// SIMD-lane reduction generic produced by MapReductionPartials -- and whose
 // single output operand is defined by a memref.subview.  A SIMD lane holds as
 // many input elements as `compute` has vector lanes for, and can span several
 // trailing input axes. Without a default compute unit the SIMD lane is the last
 // input axis alone.
-auto ktdfIsInnerDimReduction(mlir::Operation* op,
+auto ktdfIsSimdLaneReduction(mlir::Operation* op,
                              mlir::ktdf_arch::ExecutionUnitOp compute)
     -> mlir::LogicalResult {
   auto generic = llvm::dyn_cast_if_present<mlir::linalg::GenericOp>(op);
@@ -344,9 +344,9 @@ class PatternCache : public mlir::ktdf_arch::PatternCache {
     const auto compute =
         mlir::ktdf_arch::ResourceKinds(getDevice()).getDefaultCompute();
     patterns.registerConstraintFunction(
-        "ktdf.is_inner_dim_reduction",
+        "ktdf.is_simd_lane_reduction",
         [compute](mlir::PatternRewriter& /*rewriter*/, mlir::Operation* op) {
-          return ktdfIsInnerDimReduction(op, compute);
+          return ktdfIsSimdLaneReduction(op, compute);
         });
     patterns.registerConstraintFunction("ktdf.is_reduction_kind",
                                         ktdfIsReductionKind);

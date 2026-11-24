@@ -16,7 +16,7 @@
 
 
 // Verify that the post_scheduling PDL pattern in the sample device rewrites a
-// linalg.generic sum-reduction (inner-dim, output via subview) into a bare
+// linalg.generic sum-reduction (SIMD-lane, output via subview) into a bare
 // test.simd_reduction op whose second operand is the subview's *source*.
 
 #map_in  = affine_map<(d0, d1) -> (d0, d1)>
@@ -50,7 +50,7 @@ module {
 
   // A SIMD lane spanning two input axes: for f16 the sample device's compute unit
   // has 64 lanes, which the trailing [32, 2] axes hold together.  Both are
-  // reductions, so the generic is still the inner-dim reduction.
+  // reductions, so the generic is still the SIMD-lane reduction.
   func.func @sum_reduction_simd_lane_spans_two_axes() {
     %alloc_in  = memref.alloc() : memref<64x32x2xf16, "L1">
     %alloc_acc = memref.alloc() : memref<64xf16, "L1">

@@ -10,7 +10,7 @@ add_dataflow_scheduler_library(DataflowSchedulerKTDFTransforms
     ReductionUtils.cpp
     ReductionLoopExposure.cpp
     SimplifyPipeline.cpp
-    SplitReductionInnerOuterDim.cpp
+    SplitSimdLaneReduction.cpp
     StageCoarsening.cpp
     SubsumeLinearizeIndex.cpp
     TileNormalized.cpp
