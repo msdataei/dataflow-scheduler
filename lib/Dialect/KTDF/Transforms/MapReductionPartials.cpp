@@ -56,7 +56,8 @@
 // The iter_arg / loop result / scf.yield operand are stripped, and any
 // write_to_fifo that consumed the loop result is patched to use %alloc.
 //
-// ── SIMD-lane generic (produced by SplitSimdLaneReduction) ───────────────────
+// ── SIMD-lane generic (produced by SplitReductionOuterSimdLane)
+// ───────────────────
 //
 // After the outer-dim rewrite above, %alloc_G1 (memref<D0x...xDNxf16, ms>)
 // has been RAUW'd in place of the loop result, so the SIMD-lane generic sees:

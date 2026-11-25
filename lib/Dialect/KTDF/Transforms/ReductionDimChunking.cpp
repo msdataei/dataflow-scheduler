@@ -318,12 +318,10 @@ struct ReductionDimChunkingPass
         cast<ShapedType>(generic_op.getInputs().front().getType())
             .getElementType(),
         compute_);
-    FailureOr<SmallVector<unsigned>> simd_lane =
-        findReductionSimdLaneDims(generic_op, simd_lane_elements);
-    if (failed(simd_lane))
-      return generic_op.emitError(PASS_NAME)
-             << ": a SIMD lane whose dims mix reduction and parallel is not "
-                "supported";
+    FailureOr<SmallVector<unsigned>> simd_lane = findReductionSimdLaneDims(
+        generic_op, simd_lane_elements,
+        [&] { return generic_op.emitError(PASS_NAME) << ": "; });
+    if (failed(simd_lane)) return failure();
     const SmallVector<unsigned>& simd_lane_dims = *simd_lane;
 
     if (numChunks.empty()) {

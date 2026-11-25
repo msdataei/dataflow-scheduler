@@ -92,8 +92,8 @@ auto ktdfIsSimdLaneReduction(mlir::Operation* op,
 
   const int64_t simd_lane_elements =
       compute ? getVectorLanes(input_type.getElementType(), compute) : 1;
-  // A SIMD lane whose dims mix reduction and parallel is not supported; the
-  // passes before this one report it, and here it just does not match.
+  // A SIMD lane whose dims mix reduction and parallel, or that is not
+  // contiguous in memory, is not supported; here it just does not match.
   mlir::FailureOr<llvm::SmallVector<unsigned>> simd_lane_dims =
       mlir::ktdf::findReductionSimdLaneDims(generic, simd_lane_elements);
   return mlir::success(mlir::succeeded(simd_lane_dims) &&

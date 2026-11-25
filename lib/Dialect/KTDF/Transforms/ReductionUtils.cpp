@@ -43,7 +43,8 @@ namespace mlir::ktdf {
 // findReductionSimdLaneDims
 // ---------------------------------------------------------------------------
 FailureOr<SmallVector<unsigned>> findReductionSimdLaneDims(
-    linalg::GenericOp generic_op, int64_t simd_lane_elements) {
+    linalg::GenericOp generic_op, int64_t simd_lane_elements,
+    function_ref<InFlightDiagnostic()> emit_error) {
   auto input_type =
       dyn_cast<ShapedType>(generic_op.getInputs().front().getType());
   if (!input_type || !input_type.hasRank()) return SmallVector<unsigned>();
@@ -54,8 +55,8 @@ FailureOr<SmallVector<unsigned>> findReductionSimdLaneDims(
   SmallVector<unsigned> reduction_dims;
   bool has_parallel = false;
   int64_t elements = 1;
-  for (int64_t axis = input_type.getRank() - 1;
-       axis >= 0 && elements < simd_lane_elements; --axis) {
+  int64_t axis = input_type.getRank() - 1;
+  for (; axis >= 0 && elements < simd_lane_elements; --axis) {
     auto dim_expr = dyn_cast<AffineDimExpr>(input_map.getResult(axis));
     if (!dim_expr) return SmallVector<unsigned>();
 
@@ -71,17 +72,38 @@ FailureOr<SmallVector<unsigned>> findReductionSimdLaneDims(
       has_parallel = true;
   }
 
+  if (reduction_dims.empty()) return reduction_dims;
+
   // A SIMD lane whose axes mix reduction and parallel is not supported.
-  if (has_parallel && !reduction_dims.empty()) return failure();
+  if (has_parallel) {
+    if (emit_error)
+      emit_error() << "a SIMD lane whose dims mix reduction and parallel is "
+                      "not supported";
+    return failure();
+  }
+
+  // A SIMD lane is loaded as one vector, so its axes must be tightly packed:
+  // each stride the product of the sizes inside it.  A tensor has no layout
+  // and is always packed.
+  const int64_t num_simd_lane_axes = input_type.getRank() - 1 - axis;
+  auto memref_type = dyn_cast<MemRefType>(input_type);
+  if (memref_type &&
+      !memref_type.areTrailingDimsContiguous(num_simd_lane_axes)) {
+    if (emit_error)
+      emit_error() << "the SIMD lane's dims are not contiguous in memory";
+    return failure();
+  }
   return reduction_dims;
 }
 
 FailureOr<SmallVector<unsigned>> findReductionSimdLaneDims(
-    linalg::GenericOp generic_op, ktdf_arch::ExecutionUnitOp compute) {
+    linalg::GenericOp generic_op, ktdf_arch::ExecutionUnitOp compute,
+    function_ref<InFlightDiagnostic()> emit_error) {
   auto input_type = cast<ShapedType>(generic_op.getInputs().front().getType());
   return findReductionSimdLaneDims(
       generic_op,
-      scheduler::getVectorLanes(input_type.getElementType(), compute));
+      scheduler::getVectorLanes(input_type.getElementType(), compute),
+      emit_error);
 }
 
 // ---------------------------------------------------------------------------

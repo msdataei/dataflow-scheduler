@@ -1,4 +1,4 @@
-// RUN: dataflow-scheduler-opt --split-simd-lane-reduction %s | FileCheck %s
+// RUN: dataflow-scheduler-opt --split-reduction-outer-simd-lane %s | FileCheck %s
 
 // An absmax: the running value reaches the accumulation through a math.absf
 // rather than being an operand of it. So the second generic cannot be given the

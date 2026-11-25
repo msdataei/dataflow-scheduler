@@ -1,4 +1,4 @@
-// RUN: dataflow-scheduler-opt --split-simd-lane-reduction %s | FileCheck %s
+// RUN: dataflow-scheduler-opt --split-reduction-outer-simd-lane %s | FileCheck %s
 
 // A compute that accumulates two things over one input: a sum, and a sum of the
 // squares. Both halves split like a lone sum -- an intermediate, an output

@@ -1,4 +1,4 @@
-// RUN: dataflow-scheduler-opt --split-simd-lane-reduction %s | FileCheck %s
+// RUN: dataflow-scheduler-opt --split-reduction-outer-simd-lane %s | FileCheck %s
 
 
 // CHECK: #[[$ATTR_0:.+]] = affine_map<(d0, d1, d2) -> (d0, d1, d2)>

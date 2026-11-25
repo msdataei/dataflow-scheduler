@@ -116,7 +116,7 @@
 
 
 
-// Tests the SIMD-lane generic path: after SplitSimdLaneReduction +
+// Tests the SIMD-lane generic path: after SplitReductionOuterSimdLane +
 // ReductionLoopExposure the SFU compute stage contains two linalg.generic ops:
 //   G1 (outer-dim, loop-exposed): tensor<1x1x64xf16> -> tensor<1x64xf16>
 //   G2 (SIMD-lane, plain):        tensor<1x64xf16>   -> tensor<1x64xf16>

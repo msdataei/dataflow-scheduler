@@ -51,7 +51,7 @@
 //      - When the generic writes to a FIFO directly, write_to_fifo is wrapped
 //        in scf.if (all ivs == last) in the innermost loop body.
 //      - When the generic feeds downstream ops (e.g. a SIMD-lane reduction
-//        after SplitSimdLaneReduction), uses of the original generic are
+//        after SplitReductionOuterSimdLane), uses of the original generic are
 //        replaced with the outermost loop results.
 //      - The outermost loop is tagged {loop_type = reduction_loop}.
 //   9. Find the conditional-store stage via StageFactory::findStoreStage
@@ -157,11 +157,10 @@ static FailureOr<bool> collectReductionInfo(linalg::GenericOp generic_op,
   }
 
   FailureOr<SmallVector<unsigned>> simd_lane_dims =
-      ktdf::findReductionSimdLaneDims(generic_op, compute);
-  if (failed(simd_lane_dims))
-    return generic_op.emitError(PASS_NAME)
-           << ": a SIMD lane whose dims mix reduction and parallel is not "
-              "supported";
+      ktdf::findReductionSimdLaneDims(generic_op, compute, [&] {
+        return generic_op.emitError(PASS_NAME) << ": ";
+      });
+  if (failed(simd_lane_dims)) return failure();
 
   // Collect reduction dims to expose as loops, excluding only the SIMD-lane
   // dims.  Size-1 dims are skipped.
@@ -232,7 +231,7 @@ static FailureOr<bool> collectReductionInfo(linalg::GenericOp generic_op,
 // reduction dims to expose (i.e. collectReductionInfo succeeds for them).
 //
 // Generics whose first input is produced by another linalg.generic are
-// chained SIMD-lane ops (e.g. G2 after SplitSimdLaneReduction) and are
+// chained SIMD-lane ops (e.g. G2 after SplitReductionOuterSimdLane) and are
 // skipped (their reduction loops should not be exposed).
 //
 // Fails if collectReductionInfo fails for any of them.

@@ -1,4 +1,4 @@
-//===-- SplitSimdLaneReduction.cpp ------------------------------*- c++ -*-===//
+//===-- SplitReductionOuterSimdLane.cpp -------------------------*- c++ -*-===//
 //
 // Part of the Dataflow Scheduler project.
 //
@@ -42,19 +42,19 @@
 #include "mlir/Interfaces/SideEffectInterfaces.h"
 #include "mlir/Pass/Pass.h"
 
-#define PASS_NAME "split-simd-lane-reduction"
+#define PASS_NAME "split-reduction-outer-simd-lane"
 #define DEBUG_TYPE PASS_NAME
 
 using namespace mlir;
 
 namespace mlir::ktdf {
-#define GEN_PASS_DEF_SPLITSIMDLANEREDUCTIONPASS
+#define GEN_PASS_DEF_SPLITREDUCTIONOUTERSIMDLANEPASS
 #include "dataflow-scheduler/Dialect/KTDF/Transforms/Passes.h.inc"
 }  // namespace mlir::ktdf
 
 static llvm::cl::opt<bool> DisableThisPass(
     "disable-" PASS_NAME,
-    llvm::cl::desc("Disable Split Reduction Inner/Outer Dim pass"),
+    llvm::cl::desc("Disable the split-reduction-outer-simd-lane pass"),
     llvm::cl::init(false));
 
 namespace {
@@ -157,12 +157,10 @@ static FailureOr<std::optional<CandidateInfo>> partitionReductionDims(
   if (failed(collectReductionDims(generic_op, all_dims)))
     return std::optional<CandidateInfo>();
 
-  FailureOr<SmallVector<unsigned>> simd_lane =
-      ktdf::findReductionSimdLaneDims(generic_op, vector_length);
-  if (failed(simd_lane))
-    return generic_op.emitError(PASS_NAME)
-           << ": a SIMD lane whose dims mix reduction and parallel is not "
-              "supported";
+  FailureOr<SmallVector<unsigned>> simd_lane = ktdf::findReductionSimdLaneDims(
+      generic_op, vector_length,
+      [&] { return generic_op.emitError(PASS_NAME) << ": "; });
+  if (failed(simd_lane)) return failure();
   const SmallVector<unsigned>& simd_lane_dims = *simd_lane;
   if (simd_lane_dims.empty()) {
     LDBG(1) << PASS_NAME ": the SIMD lane is not a reduction — skipping";
@@ -535,11 +533,11 @@ static LogicalResult splitDim(CandidateInfo& info) {
   return success();
 }
 
-struct SplitSimdLaneReductionPass
-    : public mlir::ktdf::impl::SplitSimdLaneReductionPassBase<
-          SplitSimdLaneReductionPass> {
-  using SplitSimdLaneReductionPassBase<
-      SplitSimdLaneReductionPass>::SplitSimdLaneReductionPassBase;
+struct SplitReductionOuterSimdLanePass
+    : public mlir::ktdf::impl::SplitReductionOuterSimdLanePassBase<
+          SplitReductionOuterSimdLanePass> {
+  using SplitReductionOuterSimdLanePassBase<
+      SplitReductionOuterSimdLanePass>::SplitReductionOuterSimdLanePassBase;
 
   void runOnOperation() override {
     if (DisableThisPass) return;
@@ -604,7 +602,7 @@ struct SplitSimdLaneReductionPass
 
 }  // namespace
 
-auto mlir::ktdf::createSplitSimdLaneReductionPass()
+auto mlir::ktdf::createSplitReductionOuterSimdLanePass()
     -> std::unique_ptr<mlir::Pass> {
-  return std::make_unique<SplitSimdLaneReductionPass>();
+  return std::make_unique<SplitReductionOuterSimdLanePass>();
 }

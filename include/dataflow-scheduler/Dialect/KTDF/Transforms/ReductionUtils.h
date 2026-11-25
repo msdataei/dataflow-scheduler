@@ -48,10 +48,12 @@
 #include "dataflow-scheduler/Dialect/KTDF/KTDF.h"
 #include "dataflow-scheduler/Dialect/KTDFArch/Analysis/DeviceManager.h"
 #include "dataflow-scheduler/Dialect/KTDFArch/Analysis/ResourceKinds.h"
+#include "llvm/ADT/STLFunctionalExtras.h"
 #include "llvm/ADT/SmallVector.h"
 #include "mlir/Dialect/Linalg/IR/Linalg.h"
 #include "mlir/IR/AffineMap.h"
 #include "mlir/IR/Builders.h"
+#include "mlir/IR/Diagnostics.h"
 
 namespace mlir::ktdf {
 
@@ -68,19 +70,23 @@ namespace mlir::ktdf {
 // axes are parallel, or if one of them is not indexed by a plain loop
 // dimension. The dims are returned innermost first.
 //
-// A SIMD lane whose axes mix reduction and parallel is not supported: fails,
-// without a diagnostic, so that each caller reports it in its own terms (or,
-// for a pattern constraint, just does not match).
+// Fails on a reduction SIMD lane that is not supported: one whose axes mix
+// reduction and parallel, or, for a memref input, one whose axes are not
+// contiguous in memory (each stride the product of the sizes inside it).  The
+// reason is appended to `emit_error()` if given; without it the failure is
+// silent, e.g. for a pattern constraint that just does not match.
 // ---------------------------------------------------------------------------
 FailureOr<SmallVector<unsigned>> findReductionSimdLaneDims(
-    linalg::GenericOp generic_op, int64_t simd_lane_elements);
+    linalg::GenericOp generic_op, int64_t simd_lane_elements,
+    function_ref<InFlightDiagnostic()> emit_error = {});
 
 // ---------------------------------------------------------------------------
 // As above, with the SIMD lane sized by `compute`: as many elements of the
 // first input as `compute` has vector lanes for.
 // ---------------------------------------------------------------------------
 FailureOr<SmallVector<unsigned>> findReductionSimdLaneDims(
-    linalg::GenericOp generic_op, ktdf_arch::ExecutionUnitOp compute);
+    linalg::GenericOp generic_op, ktdf_arch::ExecutionUnitOp compute,
+    function_ref<InFlightDiagnostic()> emit_error = {});
 
 // ---------------------------------------------------------------------------
 // Return the default compute unit of `device`, whose vector lanes size a

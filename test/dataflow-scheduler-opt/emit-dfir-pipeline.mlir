@@ -61,7 +61,7 @@
 // CHECK-NEXT:   loop-invariant-code-motion
 // CHECK-NEXT:   stage-coarsening
 // CHECK-NEXT:   reduction-dim-chunking
-// CHECK-NEXT:   split-simd-lane-reduction
+// CHECK-NEXT:   split-reduction-outer-simd-lane
 // CHECK-NEXT:   reduction-loop-exposure
 // CHECK-NEXT:   map-reduction-partials
 // CHECK-NEXT:   builtin.module(

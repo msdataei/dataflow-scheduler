@@ -1,4 +1,4 @@
-// RUN: dataflow-scheduler-opt --split-simd-lane-reduction --split-input-file %s | FileCheck %s
+// RUN: dataflow-scheduler-opt --split-reduction-outer-simd-lane --split-input-file %s | FileCheck %s
 
 // Tests that a reduction whose accumulator is initialised by a splat
 // arith.constant hands that constant to the second generic of the split, which

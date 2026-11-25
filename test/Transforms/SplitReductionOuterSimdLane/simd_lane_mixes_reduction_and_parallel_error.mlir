@@ -1,4 +1,4 @@
-// RUN: dataflow-scheduler-opt --split-simd-lane-reduction %s -verify-diagnostics
+// RUN: dataflow-scheduler-opt --split-reduction-outer-simd-lane %s -verify-diagnostics
 
 // A SIMD lane whose dims mix reduction and parallel is not supported, and is an
 // error rather than an assert. On the sample device a SIMD lane is 64 f16
@@ -28,7 +28,7 @@ module {
         ktdf.stage depends_in(%p#2) depends_out(%p#3) {
           %x = ktdf.read_from_fifo %p#0 : <"L1LU" -> "SFU", 256xf16> -> tensor<1x4x32x2xf16>
           %e = tensor.empty() : tensor<1x32xf16>
-          // expected-error @+1 {{split-simd-lane-reduction: a SIMD lane whose dims mix reduction and parallel is not supported}}
+          // expected-error @+1 {{split-reduction-outer-simd-lane: a SIMD lane whose dims mix reduction and parallel is not supported}}
           %r = linalg.generic {indexing_maps = [#in, #out], iterator_types = ["parallel", "reduction", "parallel", "reduction"]} ins(%x : tensor<1x4x32x2xf16>) outs(%e : tensor<1x32xf16>) {
           ^bb0(%a: f16, %acc: f16):
             %s = arith.addf %a, %acc : f16

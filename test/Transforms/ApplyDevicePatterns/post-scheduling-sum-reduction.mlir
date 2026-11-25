@@ -21,6 +21,19 @@
 // CHECK-NOT:       test.simd_reduction_sum
 // CHECK:           return
 
+// CHECK-LABEL:   func.func @sum_reduction_simd_lane_strided_but_contiguous() {
+// CHECK-NOT:       linalg.generic
+// CHECK:           "test.simd_reduction_sum"
+// CHECK-NOT:       linalg.generic
+// CHECK:           return
+
+// CHECK-LABEL:   func.func @sum_reduction_simd_lane_not_contiguous() {
+// CHECK-NOT:       test.simd_reduction_sum
+// CHECK:           linalg.generic
+// CHECK-SAME:        ins(%{{.*}} : memref<64x32x2xf16, strided<[128, 4, 1]>, "L1">)
+// CHECK-NOT:       test.simd_reduction_sum
+// CHECK:           return
+
 
 // Verify that the post_scheduling PDL pattern in the sample device rewrites a
 // linalg.generic sum-reduction (SIMD-lane, output via subview) into a bare
@@ -96,6 +109,57 @@ module {
       outs(%subview : memref<1x32x1xf16, strided<[64, 2, 1]>, "L1">) {
     ^bb0(%in: f16, %out: f16):
       %sum = arith.addf %in, %out : f16
+      linalg.yield %sum : f16
+    }
+
+    return
+  }
+
+  // A strided input whose SIMD lane is still tightly packed: the subview takes
+  // whole rows, so the trailing [32, 2] keep strides [2, 1].  Only the outer
+  // stride differs, and the generic is still the SIMD-lane reduction.
+  func.func @sum_reduction_simd_lane_strided_but_contiguous() {
+    %alloc = memref.alloc() : memref<128x32x2xf16, "L1">
+    %in = memref.subview %alloc[64, 0, 0] [64, 32, 2] [1, 1, 1]
+        : memref<128x32x2xf16, "L1">
+          to memref<64x32x2xf16, strided<[64, 2, 1], offset: 4096>, "L1">
+    %alloc_acc = memref.alloc() : memref<64xf16, "L1">
+    %subview = memref.subview %alloc_acc[0][64][1]
+        : memref<64xf16, "L1"> to memref<64xf16, "L1">
+
+    linalg.generic {
+      indexing_maps = [#map_in3, #map_out3],
+      iterator_types = ["parallel", "reduction", "reduction"]
+    } ins(%in : memref<64x32x2xf16, strided<[64, 2, 1], offset: 4096>, "L1">)
+      outs(%subview  : memref<64xf16, "L1">) {
+    ^bb0(%a: f16, %out: f16):
+      %sum = arith.addf %a, %out : f16
+      linalg.yield %sum : f16
+    }
+
+    return
+  }
+
+  // A SIMD lane that is not contiguous in memory: the input takes 2 of every 4
+  // elements of the innermost axis, so the 32-wide axis of the trailing
+  // [32, 2] has stride 4, not 2.  It cannot be loaded as one vector, so the
+  // generic is not the SIMD-lane reduction and is left as it is.
+  func.func @sum_reduction_simd_lane_not_contiguous() {
+    %alloc = memref.alloc() : memref<64x32x4xf16, "L1">
+    %in = memref.subview %alloc[0, 0, 0] [64, 32, 2] [1, 1, 1]
+        : memref<64x32x4xf16, "L1">
+          to memref<64x32x2xf16, strided<[128, 4, 1]>, "L1">
+    %alloc_acc = memref.alloc() : memref<64xf16, "L1">
+    %subview = memref.subview %alloc_acc[0][64][1]
+        : memref<64xf16, "L1"> to memref<64xf16, "L1">
+
+    linalg.generic {
+      indexing_maps = [#map_in3, #map_out3],
+      iterator_types = ["parallel", "reduction", "reduction"]
+    } ins(%in : memref<64x32x2xf16, strided<[128, 4, 1]>, "L1">)
+      outs(%subview  : memref<64xf16, "L1">) {
+    ^bb0(%a: f16, %out: f16):
+      %sum = arith.addf %a, %out : f16
       linalg.yield %sum : f16
     }
 

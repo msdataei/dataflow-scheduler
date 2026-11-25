@@ -112,20 +112,27 @@ def SimplifyPipelinePass : Pass<"simplify-pipeline", "mlir::func::FuncOp"> {
   let dependentDialects = ["mlir::ktdf::KTDFDialect"];
 }
 
-def SplitSimdLaneReductionPass : Pass<"split-simd-lane-reduction", "mlir::ModuleOp"> {
-  let summary = "Split the SIMD-lane dimensions of a reduction from the outer ones";
+def SplitReductionOuterSimdLanePass : Pass<"split-reduction-outer-simd-lane", "mlir::ModuleOp"> {
+  let summary = "Split a reduction into an outer reduction and a SIMD-lane reduction";
   let description = [{
-    Walks the module for linalg.generic ops with at least two reduction
-    iterators and splits each into two generics: the first reduces the outer
-    reduction dimensions, the second the SIMD-lane ones.  The SIMD-lane
-    dimensions are those behind the trailing input dimensions that together
-    hold one SIMD lane, as many input elements as the compute unit has SIMD
-    lanes for; a SIMD lane can span more than one (e.g. [..., 32, 2] for a
-    64-element SIMD lane).  A reduction whose SIMD lane is not a reduction, or whose
-    reduction dimensions are all in the SIMD lane, is left as it is.  SIMD-lane
-    dimensions that do not hold exactly one SIMD lane are an error.
+    Splits a linalg.generic reduction over both outer dimensions and SIMD-lane
+    dimensions into two chained generics:
+
+      G1 reduces the outer dimensions and keeps the SIMD-lane dimensions as
+         parallel.  It is the vertical accumulation across vectors.
+      G2 reduces the SIMD-lane dimensions.  It is the horizontal reduction
+         within a vector.
+
+    The SIMD lane is the trailing input dimensions that together hold as many
+    elements as the compute unit has vector lanes for; it can span more than
+    one dimension (e.g. [..., 32, 2] for a 64-element SIMD lane).
+
+    A reduction whose SIMD lane is not reduced, or that reduces only the SIMD
+    lane, is left as it is.  A SIMD lane that does not hold exactly one vector,
+    mixes reduction and parallel dimensions, or is not contiguous in memory is
+    an error.
   }];
-  let constructor = "::mlir::ktdf::createSplitSimdLaneReductionPass()";
+  let constructor = "::mlir::ktdf::createSplitReductionOuterSimdLanePass()";
   let dependentDialects = [
     "mlir::ktdf::KTDFDialect",
     "mlir::linalg::LinalgDialect",

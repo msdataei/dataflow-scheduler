@@ -2,7 +2,7 @@
 
 // A SIMD lane need not be the last input axis alone.  For f16 the default
 // compute unit has 64 lanes, and the trailing [32, 2] axes together hold one
-// SIMD lane.  The input is what split-simd-lane-reduction produces:
+// SIMD lane.  The input is what split-reduction-outer-simd-lane produces:
 // Generic 1 reduces d0 across SIMD lanes, and Generic 2 reduces the SIMD lane
 // itself.  Only Generic 1's d0 becomes an scf.for, and each iteration loads a
 // [1, 8, 32, 2] slice.  Generic 2's reductions over both SIMD-lane axes stay
