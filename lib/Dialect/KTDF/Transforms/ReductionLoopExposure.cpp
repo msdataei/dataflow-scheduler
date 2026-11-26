@@ -25,8 +25,9 @@
 //      a reduction iterator — this is the compute stage.
 //   2. Collect reduction_dims[], their per-dimension sizes dim_sizes[] (loop
 //      ranges), and input_dims[], the dim of the first input each one indexes,
-//      leaving out the SIMD-lane dims: those of the trailing input axes that
-//      hold one SIMD lane (the default compute unit's vector lanes).
+//      leaving out the SIMD dims: those of the trailing input axes that
+//      hold one SIMD vector (as many elements as the default compute unit
+//      has vector lanes).
 //      The input is sliced along input_dims[], which differ from
 //      reduction_dims[] unless its indexing map is the identity.
 //      The total shrink factor R = product(dim_sizes[]).
@@ -50,8 +51,8 @@
 //        threads down to the innermost loop where linalg.generic runs.
 //      - When the generic writes to a FIFO directly, write_to_fifo is wrapped
 //        in scf.if (all ivs == last) in the innermost loop body.
-//      - When the generic feeds downstream ops (e.g. a SIMD-lane reduction
-//        after SplitReductionOuterSimdLane), uses of the original generic are
+//      - When the generic feeds downstream ops (e.g. a SIMD reduction
+//        after SplitReductionOuterVsSimdDims), uses of the original generic are
 //        replaced with the outermost loop results.
 //      - The outermost loop is tagged {loop_type = reduction_loop}.
 //   9. Find the conditional-store stage via StageFactory::findStoreStage
@@ -128,10 +129,10 @@ struct ReductionInfo {
 
 // ---------------------------------------------------------------------------
 // Fill `info` with the reduction dimensions and sizes derived from
-// `generic_op`, excluding the SIMD-lane reduction dimensions so that they are
-// left for later handling by the ktdf.opaque wrapping pass.  A SIMD lane holds
-// as many elements of the input as `compute` has vector lanes for, and can span
-// several trailing input axes.
+// `generic_op`, excluding the SIMD reduction dimensions so that they are
+// left for later handling by the ktdf.opaque wrapping pass.  The SIMD dims are
+// the trailing input axes that together hold one SIMD vector, i.e. as many
+// input elements as `compute` has vector lanes; they can be several axes.
 //
 // Sizes are loop ranges, and each reduction dim is recorded with the dim of
 // the first input it indexes: loop dims and input dims only coincide under an
@@ -143,8 +144,8 @@ struct ReductionInfo {
 // Fails (and emits an error) when the reduction has more than one input, or
 // when the first input cannot be sliced along the reduction dims: its map is
 // not a projected permutation, or a reduction dim to expose does not index it.
-// Also fails (and emits an error) when the dims of its SIMD lane mix reduction
-// and parallel.
+// Also fails (and emits an error) when its SIMD dims mix reduction and
+// parallel.
 // ---------------------------------------------------------------------------
 static FailureOr<bool> collectReductionInfo(linalg::GenericOp generic_op,
                                             ktdf_arch::ExecutionUnitOp compute,
@@ -156,13 +157,12 @@ static FailureOr<bool> collectReductionInfo(linalg::GenericOp generic_op,
     return false;
   }
 
-  FailureOr<SmallVector<unsigned>> simd_lane_dims =
-      ktdf::findReductionSimdLaneDims(generic_op, compute, [&] {
-        return generic_op.emitError(PASS_NAME) << ": ";
-      });
-  if (failed(simd_lane_dims)) return failure();
+  FailureOr<SmallVector<unsigned>> simd_dims = ktdf::findReductionSimdDims(
+      generic_op, compute,
+      [&] { return generic_op.emitError(PASS_NAME) << ": "; });
+  if (failed(simd_dims)) return failure();
 
-  // Collect reduction dims to expose as loops, excluding only the SIMD-lane
+  // Collect reduction dims to expose as loops, excluding only the SIMD
   // dims.  Size-1 dims are skipped.
   AffineMap input_map =
       generic_op.getMatchingIndexingMap(generic_op.getDpsInputOperand(0));
@@ -171,8 +171,8 @@ static FailureOr<bool> collectReductionInfo(linalg::GenericOp generic_op,
   auto iter_types = generic_op.getIteratorTypesArray();
   for (int64_t i = 0; i < static_cast<int64_t>(iter_types.size()); ++i) {
     if (iter_types[i] != utils::IteratorType::reduction) continue;
-    if (llvm::is_contained(*simd_lane_dims, static_cast<unsigned>(i))) {
-      LDBG(1) << PASS_NAME ": skipping SIMD-lane reduction dim " << i;
+    if (llvm::is_contained(*simd_dims, static_cast<unsigned>(i))) {
+      LDBG(1) << PASS_NAME ": skipping SIMD reduction dim " << i;
       continue;
     }
 
@@ -231,7 +231,7 @@ static FailureOr<bool> collectReductionInfo(linalg::GenericOp generic_op,
 // reduction dims to expose (i.e. collectReductionInfo succeeds for them).
 //
 // Generics whose first input is produced by another linalg.generic are
-// chained SIMD-lane ops (e.g. G2 after SplitReductionOuterSimdLane) and are
+// chained SIMD ops (e.g. G2 after SplitReductionOuterVsSimdDims) and are
 // skipped (their reduction loops should not be exposed).
 //
 // Fails if collectReductionInfo fails for any of them.
@@ -246,7 +246,7 @@ static LogicalResult collectReductionGenericOps(
         if (isa<ktdf::StageOp>(op)) return WalkResult::skip();
         if (auto generic = dyn_cast<linalg::GenericOp>(op)) {
           // Skip chained generics whose input comes from another generic —
-          // those are SIMD-lane ops left for a later pass.
+          // those are SIMD ops left for a later pass.
           if (generic.getInputs().front().getDefiningOp<linalg::GenericOp>())
             return WalkResult::advance();
           ReductionInfo info;
@@ -478,7 +478,7 @@ struct ReductionLoopExposurePass
     LDBG(1) << "========= " PASS_NAME " =========";
     ModuleOp module = getOperation();
 
-    // The SIMD lane size comes from the default compute unit's vector lanes.
+    // The SIMD vector size comes from the default compute unit's vector lanes.
     compute_ =
         ktdf::getDefaultComputeUnit(getAnalysis<ktdf_arch::DefaultDevice>());
     if (!compute_) {
@@ -490,7 +490,7 @@ struct ReductionLoopExposurePass
   }
 
  private:
-  // The default compute unit, whose vector lanes give the SIMD lane size.
+  // The default compute unit, whose vector lanes give the SIMD vector size.
   ktdf_arch::ExecutionUnitOp compute_;
 
   // -------------------------------------------------------------------------
@@ -672,7 +672,7 @@ struct ReductionLoopExposurePass
     // fifo_out: the fifo_slot operand of the write_to_fifo whose tensor input
     // is directly produced by generic_op (i.e. generic_op.getResult(0) is the
     // first operand of the write_to_fifo).  When the generic feeds another op
-    // first (e.g. a second-stage SIMD-lane reduction after SplitReduction),
+    // first (e.g. a second-stage SIMD reduction after SplitReduction),
     // this will be null and we take the non-FIFO path in rewriteComputeStage.
     // One per result: a compute reducing a pair writes each half to a slot of
     // its own. All null or all found -- a mix is a shape this does not know.
@@ -1065,7 +1065,7 @@ struct ReductionLoopExposurePass
                                     fifo_outs[r]);
       }
     } else {
-      // The generic's result feeds other ops (e.g. a downstream SIMD-lane
+      // The generic's result feeds other ops (e.g. a downstream SIMD
       // reduction). Replace all uses of the original generic with the
       // final results.
       for (unsigned r = 0; r < results; ++r) {

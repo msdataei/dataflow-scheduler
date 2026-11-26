@@ -9,7 +9,7 @@
 //
 // threshold=200 bytes.  Smallest N such that 1536 / N <= 200 is N=8.
 //
-// The SIMD lane (64 f16 elements) is the 64-wide input dim 2, held by the
+// The SIMD dim (one 64-element f16 vector) is the 64-wide input dim 2, held by the
 // parallel d2, so no reduction dim is in it and both are chunkable: d0=4
 // (index 0) and d1=3 (index 1).
 //

@@ -40,10 +40,10 @@
 namespace mlir::ktdf {
 
 // ---------------------------------------------------------------------------
-// findReductionSimdLaneDims
+// findReductionSimdDims
 // ---------------------------------------------------------------------------
-FailureOr<SmallVector<unsigned>> findReductionSimdLaneDims(
-    linalg::GenericOp generic_op, int64_t simd_lane_elements,
+FailureOr<SmallVector<unsigned>> findReductionSimdDims(
+    linalg::GenericOp generic_op, int64_t simd_elements,
     function_ref<InFlightDiagnostic()> emit_error) {
   auto input_type =
       dyn_cast<ShapedType>(generic_op.getInputs().front().getType());
@@ -56,14 +56,13 @@ FailureOr<SmallVector<unsigned>> findReductionSimdLaneDims(
   bool has_parallel = false;
   int64_t elements = 1;
   int64_t axis = input_type.getRank() - 1;
-  for (; axis >= 0 && elements < simd_lane_elements; --axis) {
+  for (; axis >= 0 && elements < simd_elements; --axis) {
     auto dim_expr = dyn_cast<AffineDimExpr>(input_map.getResult(axis));
     if (!dim_expr) return SmallVector<unsigned>();
 
     const int64_t size = input_type.getDimSize(axis);
     if (size == 1) continue;
-    elements =
-        ShapedType::isDynamic(size) ? simd_lane_elements : elements * size;
+    elements = ShapedType::isDynamic(size) ? simd_elements : elements * size;
 
     const unsigned loop_dim = dim_expr.getPosition();
     if (iter_types[loop_dim] == utils::IteratorType::reduction)
@@ -74,33 +73,32 @@ FailureOr<SmallVector<unsigned>> findReductionSimdLaneDims(
 
   if (reduction_dims.empty()) return reduction_dims;
 
-  // A SIMD lane whose axes mix reduction and parallel is not supported.
+  // SIMD dims that mix reduction and parallel are not supported.
   if (has_parallel) {
     if (emit_error)
-      emit_error() << "a SIMD lane whose dims mix reduction and parallel is "
-                      "not supported";
+      emit_error() << "SIMD dims that mix reduction and parallel are not "
+                      "supported";
     return failure();
   }
 
-  // A SIMD lane is loaded as one vector, so its axes must be tightly packed:
+  // The SIMD axes are loaded as one vector, so they must be tightly packed:
   // each stride the product of the sizes inside it.  A tensor has no layout
   // and is always packed.
-  const int64_t num_simd_lane_axes = input_type.getRank() - 1 - axis;
+  const int64_t num_simd_axes = input_type.getRank() - 1 - axis;
   auto memref_type = dyn_cast<MemRefType>(input_type);
-  if (memref_type &&
-      !memref_type.areTrailingDimsContiguous(num_simd_lane_axes)) {
+  if (memref_type && !memref_type.areTrailingDimsContiguous(num_simd_axes)) {
     if (emit_error)
-      emit_error() << "the SIMD lane's dims are not contiguous in memory";
+      emit_error() << "the SIMD dims are not contiguous in memory";
     return failure();
   }
   return reduction_dims;
 }
 
-FailureOr<SmallVector<unsigned>> findReductionSimdLaneDims(
+FailureOr<SmallVector<unsigned>> findReductionSimdDims(
     linalg::GenericOp generic_op, ktdf_arch::ExecutionUnitOp compute,
     function_ref<InFlightDiagnostic()> emit_error) {
   auto input_type = cast<ShapedType>(generic_op.getInputs().front().getType());
-  return findReductionSimdLaneDims(
+  return findReductionSimdDims(
       generic_op,
       scheduler::getVectorLanes(input_type.getElementType(), compute),
       emit_error);

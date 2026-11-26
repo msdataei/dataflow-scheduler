@@ -1,11 +1,11 @@
 // RUN: dataflow-scheduler-opt --reduction-loop-exposure %s | FileCheck %s
 
-// A SIMD lane need not be the last input axis alone.  For f16 the default
+// The SIMD dims need not be the last input axis alone.  For f16 the default
 // compute unit has 64 lanes, and the trailing [32, 2] axes together hold one
-// SIMD lane.  The input is what split-reduction-outer-simd-lane produces:
-// Generic 1 reduces d0 across SIMD lanes, and Generic 2 reduces the SIMD lane
-// itself.  Only Generic 1's d0 becomes an scf.for, and each iteration loads a
-// [1, 8, 32, 2] slice.  Generic 2's reductions over both SIMD-lane axes stay
+// SIMD vector.  The input is what split-reduction-outer-vs-simd-dims produces:
+// Generic 1 reduces d0 across SIMD vectors, and Generic 2 reduces the SIMD dims
+// themselves.  Only Generic 1's d0 becomes an scf.for, and each iteration loads a
+// [1, 8, 32, 2] slice.  Generic 2's reductions over both SIMD axes stay
 // inside it; a loop over its 32-wide axis would leave two elements per load.
 
 // CHECK: #[[$ATTR_0:.+]] = affine_map<(d0, d1, d2, d3) -> (d0, d1, d2, d3)>
@@ -14,7 +14,7 @@
 // CHECK: #[[$ATTR_3:.+]] = affine_map<(d0, d1, d2) -> (d0)>
 // CHECK-LABEL:   ktdf_arch.device @sample_device import("../../Dialect/KTDFArch/sample_device.mlir")
 
-// CHECK-LABEL:   func.func @simd_lane_spans_two_dims(
+// CHECK-LABEL:   func.func @simd_spans_two_dims(
 // CHECK-SAME:      %[[ARG0:.*]]: memref<4x8x32x2xf16, "L1">,
 // CHECK-SAME:      %[[ARG1:.*]]: memref<8xf16, "L1">) {
 // CHECK-NEXT:     %[[CONSTANT_0:.*]] = arith.constant 0 : index
@@ -73,7 +73,7 @@
 #map3 = affine_map<(d0, d1, d2) -> (d0)>
 module {
   ktdf_arch.device @sample_device import("../../Dialect/KTDFArch/sample_device.mlir")
-  func.func @simd_lane_spans_two_dims(%src: memref<4x8x32x2xf16, "L1">, %dst: memref<8xf16, "L1">) {
+  func.func @simd_spans_two_dims(%src: memref<4x8x32x2xf16, "L1">, %dst: memref<8xf16, "L1">) {
     ktdf.pipeline {
       %p:4 = ktdf.private -> (!ktdf.fifo.slot<"L1LU" -> "SFU", 2048xf16>, !ktdf.fifo.slot<"SFU" -> "L1SU", 8xf16>, !ktdf.token, !ktdf.token) {
         %f0 = ktdf.fifo.allocate() -> !ktdf.fifo.slot<"L1LU" -> "SFU", 2048xf16>

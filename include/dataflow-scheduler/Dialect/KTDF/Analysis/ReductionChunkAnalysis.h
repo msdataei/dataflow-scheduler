@@ -93,8 +93,8 @@ std::optional<ReductionChunkResult> analyzeReductionChunks(
 /// Dimensions whose size is `ShapedType::kDynamic` are skipped without
 /// consuming budget.  Iteration stops once `remaining_chunk_size` reaches 1.
 ///
-/// The SIMD-lane dims must never be chunked, so `reduction_dims` must not hold
-/// any of `simd_lane_dims` (asserted). The caller excludes them before calling
+/// The SIMD dims must never be chunked, so `reduction_dims` must not hold
+/// any of `simd_dims` (asserted). The caller excludes them before calling
 /// here.
 ///
 /// Returns std::nullopt if `remaining_chunk_size` is still > 1 after all
@@ -104,12 +104,12 @@ std::optional<ReductionChunkResult> analyzeReductionChunks(
 ///                        dim's size is its static loop range.
 /// \param reduction_dims  Chunkable reduction loop dims, outermost first.
 ///                        Dynamic dimensions are skipped.
-/// \param simd_lane_dims   The loop dims behind the trailing input axes that
-///                        hold one SIMD lane (see findReductionSimdLaneDims).
+/// \param simd_dims       The loop dims behind the trailing input axes that
+///                        hold one SIMD vector (see findReductionSimdDims).
 /// \param chunk_size      The chunk count to distribute (must be ≥ 1).
 std::optional<llvm::SmallVector<int64_t>> computeChunkDims(
     linalg::GenericOp generic_op, llvm::ArrayRef<unsigned> reduction_dims,
-    llvm::ArrayRef<unsigned> simd_lane_dims, int64_t chunk_size);
+    llvm::ArrayRef<unsigned> simd_dims, int64_t chunk_size);
 
 }  // namespace mlir::ktdf
 

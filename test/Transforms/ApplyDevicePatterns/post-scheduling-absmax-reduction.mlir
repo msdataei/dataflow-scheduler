@@ -9,7 +9,7 @@
 
 
 // Verify that the post_scheduling PDL pattern in the sample device rewrites a
-// linalg.generic absmax-reduction (SIMD-lane, output via subview) into a bare
+// linalg.generic absmax-reduction (SIMD, output via subview) into a bare
 // test.simd_absmax op whose second operand is the subview's *source*.
 
 #map_in  = affine_map<(d0, d1) -> (d0, d1)>

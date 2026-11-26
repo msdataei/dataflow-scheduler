@@ -1,9 +1,9 @@
-// RUN: dataflow-scheduler-opt --split-reduction-outer-simd-lane %s | FileCheck %s
+// RUN: dataflow-scheduler-opt --split-reduction-outer-vs-simd-dims %s | FileCheck %s
 
-// A SIMD lane can span more than one input dim. On the sample device a SIMD lane is
+// The SIMD dims can be more than one input dim. On the sample device a SIMD vector is
 // 64 f16 elements, so for tensor<2x256x32x2xf16> it is the 32x2 of the two
 // innermost dims. Both of their reduction dims (d2, d3) are inner: Generic 1
-// reduces only d1, keeping the whole SIMD lane, and Generic 2 reduces the SIMD lane.
+// reduces only d1, keeping the SIMD dims, and Generic 2 reduces them.
 
 // CHECK: #[[$ATTR_0:.+]] = affine_map<(d0, d1, d2, d3) -> (d0, d1, d2, d3)>
 // CHECK: #[[$ATTR_1:.+]] = affine_map<(d0, d1, d2, d3) -> (d0, d2, d3)>
@@ -11,7 +11,7 @@
 // CHECK: #[[$ATTR_3:.+]] = affine_map<(d0, d1, d2) -> (d0)>
 // CHECK-LABEL:   ktdf_arch.device @sample_device import("../../Dialect/KTDFArch/sample_device.mlir")
 
-// CHECK-LABEL:   func.func @two_dim_simd_lane(
+// CHECK-LABEL:   func.func @two_dim_simd(
 // CHECK-SAME:      %[[ARG0:.*]]: tensor<2x256x32x2xf16>) -> tensor<2xf16> {
 // CHECK-NEXT:     %[[EMPTY_0:.*]] = tensor.empty() : tensor<2x32x2xf16>
 // CHECK-NEXT:     %[[GENERIC_0:.*]] = linalg.generic {indexing_maps = [#[[$ATTR_0]], #[[$ATTR_1]]], iterator_types = ["parallel", "reduction", "parallel", "parallel"]} ins(%[[ARG0]] : tensor<2x256x32x2xf16>) outs(%[[EMPTY_0]] : tensor<2x32x2xf16>) {
@@ -30,16 +30,16 @@
 
 
 
-// A SIMD lane can span more than one input dim. On the sample device a SIMD lane is
+// The SIMD dims can be more than one input dim. On the sample device a SIMD vector is
 // 64 f16 elements, so for tensor<2x256x32x2xf16> it is the 32x2 of the two
 // innermost dims. Both of their reduction dims (d2, d3) are inner: Generic 1
-// reduces only d1, keeping the whole SIMD lane, and Generic 2 reduces the SIMD lane.
+// reduces only d1, keeping the SIMD dims, and Generic 2 reduces them.
 
 #in  = affine_map<(d0, d1, d2, d3) -> (d0, d1, d2, d3)>
 #out = affine_map<(d0, d1, d2, d3) -> (d0)>
 module {
   ktdf_arch.device @sample_device import("../../Dialect/KTDFArch/sample_device.mlir")
-  func.func @two_dim_simd_lane(%in: tensor<2x256x32x2xf16>) -> tensor<2xf16> {
+  func.func @two_dim_simd(%in: tensor<2x256x32x2xf16>) -> tensor<2xf16> {
     %init = tensor.empty() : tensor<2xf16>
     %res = linalg.generic {indexing_maps = [#in, #out], iterator_types = ["parallel", "reduction", "reduction", "reduction"]} ins(%in : tensor<2x256x32x2xf16>) outs(%init : tensor<2xf16>) {
     ^bb0(%a: f16, %acc: f16):

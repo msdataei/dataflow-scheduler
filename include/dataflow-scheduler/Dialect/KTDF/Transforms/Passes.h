@@ -40,7 +40,7 @@ auto createMapReductionPartialsPass() -> std::unique_ptr<Pass>;
 
 auto createReductionDimChunkingPass() -> std::unique_ptr<Pass>;
 
-auto createSplitReductionOuterSimdLanePass() -> std::unique_ptr<Pass>;
+auto createSplitReductionOuterVsSimdDimsPass() -> std::unique_ptr<Pass>;
 
 auto createReductionLoopExposurePass() -> std::unique_ptr<Pass>;
 

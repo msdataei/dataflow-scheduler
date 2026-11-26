@@ -65,15 +65,15 @@ namespace scheduler {
 
 namespace {
 
-// Returns success (and no results) when `op` is a linalg.generic whose input
-// axes holding one SIMD lane map to reduction iterators -- i.e. it is the
-// SIMD-lane reduction generic produced by MapReductionPartials -- and whose
-// single output operand is defined by a memref.subview.  A SIMD lane holds as
-// many input elements as `compute` has vector lanes for, and can span several
-// trailing input axes. Without a default compute unit the SIMD lane is the last
-// input axis alone.
-auto ktdfIsSimdLaneReduction(mlir::Operation* op,
-                             mlir::ktdf_arch::ExecutionUnitOp compute)
+// Returns success (and no results) when `op` is a linalg.generic whose SIMD
+// dims map to reduction iterators -- i.e. it is the SIMD reduction generic
+// produced by MapReductionPartials -- and whose single output operand is
+// defined by a memref.subview.  The SIMD dims are the trailing input axes that
+// together hold one SIMD vector, i.e. as many input elements as `compute` has
+// vector lanes; they can be several axes. Without a default compute unit the
+// SIMD dim is the last input axis alone.
+auto ktdfIsSimdReduction(mlir::Operation* op,
+                         mlir::ktdf_arch::ExecutionUnitOp compute)
     -> mlir::LogicalResult {
   auto generic = llvm::dyn_cast_if_present<mlir::linalg::GenericOp>(op);
   if (!generic || generic.getInputs().empty()) return mlir::failure();
@@ -84,20 +84,19 @@ auto ktdfIsSimdLaneReduction(mlir::Operation* op,
 
   // The output must be a rank-reducing subview produced by
   // MapReductionPartials.  Checked first, so that only such a generic has its
-  // SIMD lane looked at.
+  // SIMD dims looked at.
   if (generic.getOutputs().empty()) return mlir::failure();
   if (!llvm::isa_and_nonnull<mlir::memref::SubViewOp>(
           generic.getOutputs().front().getDefiningOp()))
     return mlir::failure();
 
-  const int64_t simd_lane_elements =
+  const int64_t simd_elements =
       compute ? getVectorLanes(input_type.getElementType(), compute) : 1;
-  // A SIMD lane whose dims mix reduction and parallel, or that is not
-  // contiguous in memory, is not supported; here it just does not match.
-  mlir::FailureOr<llvm::SmallVector<unsigned>> simd_lane_dims =
-      mlir::ktdf::findReductionSimdLaneDims(generic, simd_lane_elements);
-  return mlir::success(mlir::succeeded(simd_lane_dims) &&
-                       !simd_lane_dims->empty());
+  // SIMD dims that mix reduction and parallel, or that are not contiguous in
+  // memory, are not supported; here they just do not match.
+  mlir::FailureOr<llvm::SmallVector<unsigned>> simd_dims =
+      mlir::ktdf::findReductionSimdDims(generic, simd_elements);
+  return mlir::success(mlir::succeeded(simd_dims) && !simd_dims->empty());
 }
 
 // Rewrite helper: ktdf.subview_source(value) → Value
@@ -344,9 +343,9 @@ class PatternCache : public mlir::ktdf_arch::PatternCache {
     const auto compute = mlir::ktdf::findDefaultComputeUnit(
         mlir::ktdf_arch::ResourceKinds(getDevice()));
     patterns.registerConstraintFunction(
-        "ktdf.is_simd_lane_reduction",
+        "ktdf.is_simd_reduction",
         [compute](mlir::PatternRewriter& /*rewriter*/, mlir::Operation* op) {
-          return ktdfIsSimdLaneReduction(op, compute);
+          return ktdfIsSimdReduction(op, compute);
         });
     patterns.registerConstraintFunction("ktdf.is_reduction_kind",
                                         ktdfIsReductionKind);

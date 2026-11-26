@@ -111,13 +111,13 @@ std::optional<ReductionChunkResult> mlir::ktdf::analyzeReductionChunks(
 
 std::optional<llvm::SmallVector<int64_t>> mlir::ktdf::computeChunkDims(
     linalg::GenericOp generic_op, llvm::ArrayRef<unsigned> reduction_dims,
-    llvm::ArrayRef<unsigned> simd_lane_dims, int64_t chunk_size) {
+    llvm::ArrayRef<unsigned> simd_dims, int64_t chunk_size) {
   assert(chunk_size >= 1 && "chunk_size must be >= 1");
   assert(llvm::none_of(reduction_dims,
                        [&](unsigned dim) {
-                         return llvm::is_contained(simd_lane_dims, dim);
+                         return llvm::is_contained(simd_dims, dim);
                        }) &&
-         "a SIMD-lane reduction dim must not be chunked");
+         "a SIMD reduction dim must not be chunked");
 
   const auto loop_ranges = generic_op.getStaticLoopRanges();
   llvm::SmallVector<int64_t> new_sizes;

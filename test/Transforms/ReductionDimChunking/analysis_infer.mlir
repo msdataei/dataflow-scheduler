@@ -9,8 +9,8 @@
 // Default threshold = 1 MiB = 1,048,576 bytes.
 // Smallest N such that 4,194,304 / N ≤ 1,048,576 is N=4.
 //
-// The reduction dim at index 1 (size 32768) is chunkable.  The SIMD lane
-// (64 f16 elements) is the 64-wide input dim 2, held by the parallel loop dim
+// The reduction dim at index 1 (size 32768) is chunkable.  The SIMD dim
+// (one 64-element f16 vector) is the 64-wide input dim 2, held by the parallel loop dim
 // 2, so no reduction dim is excluded.
 //
 // computeChunkDims distributes N=4 across [32768]:

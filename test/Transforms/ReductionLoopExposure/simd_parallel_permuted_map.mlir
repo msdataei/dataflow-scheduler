@@ -1,18 +1,18 @@
 // RUN: dataflow-scheduler-opt --reduction-loop-exposure %s | FileCheck %s
 
-// The SIMD lane comes from the input's trailing axes, not from the loop order.
+// The SIMD dims come from the input's trailing axes, not from the loop order.
 // The loops are d0 = 8, d1 = 32, d2 = 2 and d3 = 64, with d3 the reduction,
 // but the input is tensor<8x64x32x2xf16> indexed by (d0, d3, d1, d2).  On the
-// sample device a SIMD lane is 64 f16 elements, so it is the 32x2 of the two
-// innermost input axes, held by the parallel d1 and d2.  The SIMD lane is not a
-// reduction, so findReductionSimdLaneDims returns no dims and d3 becomes an
+// sample device a SIMD vector is 64 f16 elements, so it is the 32x2 of the two
+// innermost input axes, held by the parallel d1 and d2.  The SIMD dims are not
+// reductions, so findReductionSimdDims returns no dims and d3 becomes an
 // scf.for over input axis 1.
 
 // CHECK: #[[$ATTR_0:.+]] = affine_map<(d0, d1, d2, d3) -> (d0, d3, d1, d2)>
 // CHECK: #[[$ATTR_1:.+]] = affine_map<(d0, d1, d2, d3) -> (d0, d1, d2)>
 // CHECK-LABEL:   ktdf_arch.device @sample_device import("../../Dialect/KTDFArch/sample_device.mlir")
 
-// CHECK-LABEL:   func.func @simd_lane_parallel_permuted_map(
+// CHECK-LABEL:   func.func @simd_parallel_permuted_map(
 // CHECK-SAME:      %[[ARG0:.*]]: memref<8x64x32x2xf16, "L1">,
 // CHECK-SAME:      %[[ARG1:.*]]: memref<8x32x2xf16, "L1">) {
 // CHECK-NEXT:     %[[CONSTANT_0:.*]] = arith.constant 0 : index
@@ -66,7 +66,7 @@
 #out = affine_map<(d0, d1, d2, d3) -> (d0, d1, d2)>
 module {
   ktdf_arch.device @sample_device import("../../Dialect/KTDFArch/sample_device.mlir")
-  func.func @simd_lane_parallel_permuted_map(%src: memref<8x64x32x2xf16, "L1">, %dst: memref<8x32x2xf16, "L1">) {
+  func.func @simd_parallel_permuted_map(%src: memref<8x64x32x2xf16, "L1">, %dst: memref<8x32x2xf16, "L1">) {
     ktdf.pipeline {
       %p:4 = ktdf.private -> (!ktdf.fifo.slot<"L1LU" -> "SFU", 32768xf16>, !ktdf.fifo.slot<"SFU" -> "L1SU", 512xf16>, !ktdf.token, !ktdf.token) {
         %f0 = ktdf.fifo.allocate() -> !ktdf.fifo.slot<"L1LU" -> "SFU", 32768xf16>

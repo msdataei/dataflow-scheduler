@@ -1,7 +1,7 @@
 // RUN: dataflow-scheduler-opt --reduction-dim-chunking="chunk-size-threshold=128" %s -verify-diagnostics
 
-// A SIMD lane whose dims mix reduction and parallel is not supported, and is an
-// error rather than an assert. On the sample device a SIMD lane is 64 f16
+// SIMD dims that mix reduction and parallel are not supported, and are an
+// error rather than an assert. On the sample device a SIMD vector is 64 f16
 // elements, so for tensor<1x4x32x2xf16> it is the 32x2 of the two innermost
 // dims: the 2-wide d3 is a reduction but the 32-wide d2 is parallel.
 
@@ -9,7 +9,7 @@
 #out = affine_map<(d0, d1, d2, d3) -> (d0, d2)>
 module {
   ktdf_arch.device @sample_device import("../../Dialect/KTDFArch/sample_device.mlir")
-  func.func @mixed_simd_lane(%src: memref<2x1x4x32x2xf16, "L1">, %dst: memref<2x1x32xf16, "L1">) {
+  func.func @mixed_simd(%src: memref<2x1x4x32x2xf16, "L1">, %dst: memref<2x1x32xf16, "L1">) {
     %c0 = arith.constant 0 : index
     %c1 = arith.constant 1 : index
     %c2 = arith.constant 2 : index
@@ -28,7 +28,7 @@ module {
         ktdf.stage depends_in(%p#2) depends_out(%p#3) {
           %x = ktdf.read_from_fifo %p#0 : <"L1LU" -> "SFU", 256xf16> -> tensor<1x4x32x2xf16>
           %e = tensor.empty() : tensor<1x32xf16>
-          // expected-error @+1 {{reduction-dim-chunking: a SIMD lane whose dims mix reduction and parallel is not supported}}
+          // expected-error @+1 {{reduction-dim-chunking: SIMD dims that mix reduction and parallel are not supported}}
           %r = linalg.generic {indexing_maps = [#in, #out], iterator_types = ["parallel", "reduction", "parallel", "reduction"]} ins(%x : tensor<1x4x32x2xf16>) outs(%e : tensor<1x32xf16>) {
           ^bb0(%a: f16, %acc: f16):
             %s = arith.addf %a, %acc : f16

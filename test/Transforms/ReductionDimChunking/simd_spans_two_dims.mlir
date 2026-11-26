@@ -1,19 +1,19 @@
 // RUN: dataflow-scheduler-opt --reduction-dim-chunking="chunk-size-threshold=128" %s | FileCheck %s
 
-// A SIMD lane can span more than one input dim. On the sample device a SIMD lane is
+// The SIMD dims can be more than one input dim. On the sample device a SIMD vector is
 // 64 f16 elements, so for tensor<1x4x32x2xf16> it is the 32x2 of the two
 // innermost dims, and both of their reduction loop dims (d2, d3) stay out of
 // chunking, not only the innermost one.
 //
 // total_input_bytes = 4 * 32 * 2 * 2 = 512; threshold=128 -> N=4, which only
-// the 4-wide d1 is left to take: 4 chunks of one SIMD lane each.
+// the 4-wide d1 is left to take: 4 chunks of one SIMD vector each.
 
 // CHECK: #[[$ATTR_0:.+]] = affine_map<(d0, d1, d2, d3) -> (d0, d1, d2, d3)>
 // CHECK: #[[$ATTR_1:.+]] = affine_map<(d0, d1, d2, d3) -> (d0)>
 // CHECK: #[[$ATTR_2:.+]] = affine_map<(d0) -> (d0)>
 // CHECK-LABEL:   ktdf_arch.device @sample_device import("../../Dialect/KTDFArch/sample_device.mlir")
 
-// CHECK-LABEL:   func.func @two_dim_simd_lane(
+// CHECK-LABEL:   func.func @two_dim_simd(
 // CHECK-SAME:      %[[ARG0:.*]]: memref<2x1x4x32x2xf16, "L1">,
 // CHECK-SAME:      %[[ARG1:.*]]: memref<2x1xf16, "L1">) {
 // CHECK-NEXT:     %[[CONSTANT_0:.*]] = arith.constant 0 : index
@@ -81,19 +81,19 @@
 
 
 
-// A SIMD lane can span more than one input dim. On the sample device a SIMD lane is
+// The SIMD dims can be more than one input dim. On the sample device a SIMD vector is
 // 64 f16 elements, so for tensor<1x4x32x2xf16> it is the 32x2 of the two
 // innermost dims, and both of their reduction loop dims (d2, d3) stay out of
 // chunking, not only the innermost one.
 //
 // total_input_bytes = 4 * 32 * 2 * 2 = 512; threshold=128 -> N=4, which only
-// the 4-wide d1 is left to take: 4 chunks of one SIMD lane each.
+// the 4-wide d1 is left to take: 4 chunks of one SIMD vector each.
 
 #in  = affine_map<(d0, d1, d2, d3) -> (d0, d1, d2, d3)>
 #out = affine_map<(d0, d1, d2, d3) -> (d0)>
 module {
   ktdf_arch.device @sample_device import("../../Dialect/KTDFArch/sample_device.mlir")
-  func.func @two_dim_simd_lane(%src: memref<2x1x4x32x2xf16, "L1">, %dst: memref<2x1xf16, "L1">) {
+  func.func @two_dim_simd(%src: memref<2x1x4x32x2xf16, "L1">, %dst: memref<2x1xf16, "L1">) {
     %c0 = arith.constant 0 : index
     %c1 = arith.constant 1 : index
     %c2 = arith.constant 2 : index

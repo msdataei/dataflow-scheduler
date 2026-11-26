@@ -1,7 +1,7 @@
 // RUN: dataflow-scheduler-opt --reduction-dim-chunking="chunk-size-threshold=32768" %s | FileCheck %s
 
 // Test: threshold path where the entire budget is absorbed by the outermost
-// reduction dim, leaving the SIMD-lane reduction dim untouched.
+// reduction dim, leaving the SIMD reduction dim untouched.
 //
 // Input linalg.generic: iterator_types = ["reduction", "reduction", "parallel"]
 // over tensor<2x256x64xf16> → tensor<64xf16>.

@@ -58,41 +58,42 @@
 namespace mlir::ktdf {
 
 // ---------------------------------------------------------------------------
-// Return the loop dimensions of the SIMD-lane reduction: those behind the
-// trailing input axes that together hold one SIMD lane of `simd_lane_elements`
-// elements, if they are reductions. A SIMD lane need not be the last axis
-// alone; it can span several, e.g. [..., 64, 2] for a 128-element SIMD lane.
+// Return the SIMD dims of the reduction: the loop dimensions behind the
+// trailing input axes that together hold one SIMD vector of `simd_elements`
+// elements, if they are reductions. The SIMD dims need not be the last axis
+// alone; they can span several, e.g. [..., 64, 2] for a 128-element SIMD
+// vector.
 // The input may be a ranked tensor or a memref.
 //
 // The axes are taken from the last one back until their sizes reach
-// `simd_lane_elements` (or the axes run out). Unit axes are passed over, and a
-// dynamic axis ends the SIMD lane. Returns an empty vector if the SIMD lane's
-// axes are parallel, or if one of them is not indexed by a plain loop
+// `simd_elements` (or the axes run out). Unit axes are passed over, and a
+// dynamic axis ends the SIMD dims. Returns an empty vector if the SIMD axes
+// are parallel, or if one of them is not indexed by a plain loop
 // dimension. The dims are returned innermost first.
 //
-// Fails on a reduction SIMD lane that is not supported: one whose axes mix
-// reduction and parallel, or, for a memref input, one whose axes are not
-// contiguous in memory (each stride the product of the sizes inside it).  The
-// reason is appended to `emit_error()` if given; without it the failure is
-// silent, e.g. for a pattern constraint that just does not match.
+// Fails on SIMD dims that are not supported: SIMD axes that mix reduction and
+// parallel, or, for a memref input, SIMD axes that are not contiguous in memory
+// (each stride the product of the sizes inside it).  The reason is appended to
+// `emit_error()` if given; without it the failure is silent, e.g. for a pattern
+// constraint that just does not match.
 // ---------------------------------------------------------------------------
-FailureOr<SmallVector<unsigned>> findReductionSimdLaneDims(
-    linalg::GenericOp generic_op, int64_t simd_lane_elements,
+FailureOr<SmallVector<unsigned>> findReductionSimdDims(
+    linalg::GenericOp generic_op, int64_t simd_elements,
     function_ref<InFlightDiagnostic()> emit_error = {});
 
 // ---------------------------------------------------------------------------
-// As above, with the SIMD lane sized by `compute`: as many elements of the
-// first input as `compute` has vector lanes for.
+// As above, with the SIMD vector sized by `compute`: as many elements of the
+// first input as `compute` has vector lanes.
 // ---------------------------------------------------------------------------
-FailureOr<SmallVector<unsigned>> findReductionSimdLaneDims(
+FailureOr<SmallVector<unsigned>> findReductionSimdDims(
     linalg::GenericOp generic_op, ktdf_arch::ExecutionUnitOp compute,
     function_ref<InFlightDiagnostic()> emit_error = {});
 
 // ---------------------------------------------------------------------------
 // Return the default compute unit of `device`, whose vector lanes size a
-// SIMD lane. Returns null if there is no device (the analysis has reported it)
-// or if the device has no unambiguous default compute unit (an error is emitted
-// on the device declaration).
+// SIMD vector. Returns null if there is no device (the analysis has reported
+// it) or if the device has no unambiguous default compute unit (an error is
+// emitted on the device declaration).
 // ---------------------------------------------------------------------------
 ktdf_arch::ExecutionUnitOp getDefaultComputeUnit(
     const ktdf_arch::DefaultDevice& device);

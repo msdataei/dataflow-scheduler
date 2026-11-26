@@ -14,7 +14,7 @@
 //   i=0: gcd(2, 4) = 2  → new_d0 = 1, remaining = 2
 //   i=1: gcd(4, 2) = 2  → new_d1 = 2, remaining = 1  (stop)
 //   d2=3136 is never reached: the budget is used up before it
-// (the SIMD lane is the parallel 64-wide d3, so no reduction dim is excluded)
+// (the SIMD dim is the parallel 64-wide d3, so no reduction dim is excluded)
 //
 // Result: chunk_sizes = [1, 2, 3136], per_dim_num_chunks = [2, 2, 1]
 // Two nested scf.for loops: outer bound=2 (d0), inner bound=2 (d1).

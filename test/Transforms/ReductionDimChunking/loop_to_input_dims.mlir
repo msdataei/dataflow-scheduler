@@ -205,7 +205,7 @@ module {
 // -----
 
 // Reduction loop d2 indexes input dim 1 of a column sum, not input dim 2,
-// which holds the SIMD lane.
+// which is the SIMD dim.
 // CHECK-DAG: #[[$COL_IN:map[0-9]*]] = affine_map<(d0, d1, d2) -> (d0, d2, d1)>
 // CHECK-DAG: #[[$COL_OUT:map[0-9]*]] = affine_map<(d0, d1, d2) -> (d0, d1)>
 // CHECK-DAG: #[[$COL_ID:map[0-9]*]] = affine_map<(d0, d1) -> (d0, d1)>
